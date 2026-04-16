@@ -12,7 +12,7 @@ from collections import defaultdict
 import numpy as np
 
 DATE_COLUMN_HINTS = {"fecha", "fecha_adquisicion", "fecha_de_adquisicion", "date", "acquisition_date"}
-MIN_DMSO_N_RECOMMENDED = 3
+MIN_CONTROL_N_RECOMMENDED = 3
 SIMILAR_LABEL_THRESHOLD = 0.92
 
 
@@ -210,7 +210,7 @@ def detect_date_column(headers):
     raise ValueError("No date column detected.")
 
 
-def detect_dmso_column(headers, date_column):
+def detect_default_control_column(headers, date_column):
     exact_matches, fuzzy_matches = [], []
     for header in headers:
         if header == date_column:
@@ -226,7 +226,10 @@ def detect_dmso_column(headers, date_column):
         return matches[0]
     if len(matches) > 1:
         raise ValueError(f"Multiple DMSO-like columns detected: {matches}")
-    raise ValueError("No DMSO column detected.")
+    condition_headers = [header for header in headers if header != date_column]
+    if condition_headers:
+        return condition_headers[0]
+    raise ValueError("No candidate control column detected.")
 
 
 def warn_on_similar_columns(condition_headers, warnings, source_file):
@@ -251,13 +254,18 @@ def warn_on_similar_columns(condition_headers, warnings, source_file):
                 add_warning(warnings, "warning", "similar_condition_names", f"Condition names may be inconsistent: {left!r} vs {right!r}.", source_file=source_file)
 
 
-def build_long_rows(loaded, source_file, warnings):
+def build_long_rows(loaded, source_file, warnings, requested_control_column=None):
     headers = loaded["headers"]
     date_column = detect_date_column(headers)
-    dmso_column = detect_dmso_column(headers, date_column)
-    add_warning(warnings, "info", "detected_date_column", f"Detected date column: {date_column}.", source_file=source_file, column_name=date_column)
-    add_warning(warnings, "info", "detected_dmso_column", f"Detected DMSO anchor column: {dmso_column}.", source_file=source_file, column_name=dmso_column)
     condition_headers = [header for header in headers if header != date_column]
+    if requested_control_column:
+        if requested_control_column not in condition_headers:
+            raise ValueError(f"Selected control column {requested_control_column!r} is not present in {source_file}.")
+        control_column = requested_control_column
+    else:
+        control_column = detect_default_control_column(headers, date_column)
+    add_warning(warnings, "info", "detected_date_column", f"Detected date column: {date_column}.", source_file=source_file, column_name=date_column)
+    add_warning(warnings, "info", "selected_control_column", f"Selected control column: {control_column}.", source_file=source_file, column_name=control_column)
     warn_on_similar_columns(condition_headers, warnings, source_file)
     unique_condition_keys = uniquify_labels(condition_headers)
     nonempty_counts = {header: 0 for header in condition_headers}
@@ -288,14 +296,14 @@ def build_long_rows(loaded, source_file, warnings):
                 "condition_key": unique_condition_keys[condition_original],
                 "raw_value": cleaned_raw_value,
                 "intensity": float(numeric_value),
-                "is_dmso_condition": condition_original == dmso_column,
+                "is_control_condition": condition_original == control_column,
             })
     for header, count in nonempty_counts.items():
         if count == 0:
             add_warning(warnings, "warning", "empty_condition_column", f"Condition column {header!r} produced no embryo records.", source_file=source_file, column_name=header)
     if not long_rows:
         raise ValueError("No valid embryo measurements were parsed from the file.")
-    return long_rows, dmso_column
+    return long_rows, control_column
 
 
 def summarize_values(values):
@@ -327,60 +335,60 @@ def compute_outlier_flags(long_rows):
         row["is_iqr_outlier_within_date_condition"] = bool(row["intensity"] < lower or row["intensity"] > upper)
 
 
-def normalize_by_dmso(long_rows, dmso_column, warnings, source_file, branch_label):
-    dmso_by_date = defaultdict(list)
+def normalize_by_control(long_rows, control_column, warnings, source_file, branch_label):
+    control_by_date = defaultdict(list)
     for row in long_rows:
-        if row["condition_original"] == dmso_column:
-            dmso_by_date[row["acquisition_date"]].append(row["intensity"])
-    dmso_rows = []
-    dmso_summary = {}
+        if row["condition_original"] == control_column:
+            control_by_date[row["acquisition_date"]].append(row["intensity"])
+    control_rows = []
+    control_summary = {}
     all_dates = sorted({row["acquisition_date"] for row in long_rows})
     for acquisition_date in all_dates:
-        dmso_values = dmso_by_date.get(acquisition_date, [])
-        stats = summarize_values(dmso_values)
+        control_values = control_by_date.get(acquisition_date, [])
+        stats = summarize_values(control_values)
         anchor = stats["median"]
         status = "ok"
-        if not dmso_values:
-            status = "missing_dmso"
-            add_warning(warnings, "warning", "missing_dmso_anchor", f"Date has no valid DMSO measurements in branch '{branch_label}'.", source_file=source_file, date_raw=acquisition_date)
-        elif len(dmso_values) < MIN_DMSO_N_RECOMMENDED:
-            status = "low_dmso_n"
-            add_warning(warnings, "warning", "low_dmso_n", f"Date has only {len(dmso_values)} DMSO embryos in branch '{branch_label}'.", source_file=source_file, date_raw=acquisition_date)
+        if not control_values:
+            status = "missing_control"
+            add_warning(warnings, "warning", "missing_control_anchor", f"Date has no valid control measurements in branch '{branch_label}'.", source_file=source_file, date_raw=acquisition_date, column_name=control_column)
+        elif len(control_values) < MIN_CONTROL_N_RECOMMENDED:
+            status = "low_control_n"
+            add_warning(warnings, "warning", "low_control_n", f"Date has only {len(control_values)} control embryos in branch '{branch_label}'.", source_file=source_file, date_raw=acquisition_date, column_name=control_column)
         if anchor is None or anchor <= 0:
-            status = "invalid_dmso_anchor"
-            add_warning(warnings, "warning", "invalid_dmso_anchor", f"Date could not be normalized in branch '{branch_label}'.", source_file=source_file, date_raw=acquisition_date)
-        dmso_row = {
+            status = "invalid_control_anchor"
+            add_warning(warnings, "warning", "invalid_control_anchor", f"Date could not be normalized in branch '{branch_label}'.", source_file=source_file, date_raw=acquisition_date, column_name=control_column)
+        control_row = {
             "source_file": source_file,
             "acquisition_date": acquisition_date,
-            "dmso_condition_original": dmso_column,
-            "dmso_n": len(dmso_values),
-            "dmso_mean": stats["mean"],
-            "dmso_median": anchor,
-            "dmso_sd": stats["sd"],
-            "dmso_mad": stats["mad"],
-            "dmso_iqr": stats["iqr"],
+            "control_condition_original": control_column,
+            "control_n": len(control_values),
+            "control_mean": stats["mean"],
+            "control_median": anchor,
+            "control_sd": stats["sd"],
+            "control_mad": stats["mad"],
+            "control_iqr": stats["iqr"],
             "anchor_status": status,
             "analysis_variant": branch_label,
         }
-        dmso_rows.append(dmso_row)
-        dmso_summary[acquisition_date] = dmso_row
+        control_rows.append(control_row)
+        control_summary[acquisition_date] = control_row
     for row in long_rows:
-        anchor_info = dmso_summary[row["acquisition_date"]]
-        anchor = anchor_info["dmso_median"]
-        row["dmso_n"] = anchor_info["dmso_n"]
-        row["dmso_median"] = anchor
+        anchor_info = control_summary[row["acquisition_date"]]
+        anchor = anchor_info["control_median"]
+        row["control_n"] = anchor_info["control_n"]
+        row["control_median"] = anchor
         row["anchor_status"] = anchor_info["anchor_status"]
         row["analysis_variant"] = branch_label
         if anchor is None or anchor <= 0:
-            row["ratio_vs_dmso"] = None
-            row["log2fc_vs_dmso"] = None
+            row["ratio_vs_control"] = None
+            row["log2fc_vs_control"] = None
             row["normalization_status"] = "not_normalized_missing_anchor"
         else:
             ratio = row["intensity"] / anchor
-            row["ratio_vs_dmso"] = ratio
-            row["log2fc_vs_dmso"] = log2_or_none(ratio)
+            row["ratio_vs_control"] = ratio
+            row["log2fc_vs_control"] = log2_or_none(ratio)
             row["normalization_status"] = "normalized"
-    return long_rows, dmso_rows
+    return long_rows, control_rows
 
 
 def build_summary_rows(long_rows):
@@ -390,8 +398,8 @@ def build_summary_rows(long_rows):
     summary_rows = []
     for (acquisition_date, condition_key), rows in sorted(grouped.items()):
         intensities = [row["intensity"] for row in rows]
-        ratios = [row["ratio_vs_dmso"] for row in rows if row["ratio_vs_dmso"] is not None]
-        log2fcs = [row["log2fc_vs_dmso"] for row in rows if row["log2fc_vs_dmso"] is not None]
+        ratios = [row["ratio_vs_control"] for row in rows if row["ratio_vs_control"] is not None]
+        log2fcs = [row["log2fc_vs_control"] for row in rows if row["log2fc_vs_control"] is not None]
         raw_stats = summarize_values(intensities)
         ratio_stats = summarize_values(ratios)
         log2_stats = summarize_values(log2fcs)
@@ -441,18 +449,18 @@ def build_variation_rows(summary_rows):
     return variation_rows
 
 
-def build_analysis_branch(base_rows, dmso_column, warnings, source_file, branch_label, exclude_outliers):
+def build_analysis_branch(base_rows, control_column, warnings, source_file, branch_label, exclude_outliers):
     branch_rows = [copy.deepcopy(row) for row in base_rows]
     if exclude_outliers:
         branch_rows = [row for row in branch_rows if not row["is_iqr_outlier_within_date_condition"]]
     if not branch_rows:
         add_warning(warnings, "warning", "empty_branch_after_outlier_removal", f"Branch '{branch_label}' has no rows after outlier exclusion.", source_file=source_file)
         return [], [], [], []
-    branch_rows, dmso_rows = normalize_by_dmso(branch_rows, dmso_column, warnings, source_file, branch_label)
+    branch_rows, control_rows = normalize_by_control(branch_rows, control_column, warnings, source_file, branch_label)
     branch_rows.sort(key=lambda row: (row["acquisition_date"], row["source_row_number"], row["condition_original"]))
     summary_rows = build_summary_rows(branch_rows)
     variation_rows = build_variation_rows(summary_rows)
-    return branch_rows, summary_rows, dmso_rows, variation_rows
+    return branch_rows, summary_rows, control_rows, variation_rows
 
 
 def rows_to_csv(rows):
@@ -465,11 +473,11 @@ def rows_to_csv(rows):
     return output.getvalue()
 
 
-def analyze_one_file(source_file, text):
+def analyze_one_file(source_file, text, control_column=None):
     warnings = []
     add_warning(warnings, "info", "file_loaded", "Loaded file in browser.", source_file=source_file)
     loaded = read_csv_text(text, source_file, warnings)
-    long_rows, dmso_column = build_long_rows(loaded, source_file, warnings)
+    long_rows, selected_control_column = build_long_rows(loaded, source_file, warnings, requested_control_column=control_column)
     compute_outlier_flags(long_rows)
     n_outliers = sum(1 for row in long_rows if row["is_iqr_outlier_within_date_condition"])
     if n_outliers:
@@ -477,8 +485,8 @@ def analyze_one_file(source_file, text):
     removed_outlier_rows = [copy.deepcopy(row) for row in long_rows if row["is_iqr_outlier_within_date_condition"]]
     for row in removed_outlier_rows:
         row["analysis_variant"] = "removed_outliers"
-    retained_long_rows, retained_summary_rows, retained_dmso_rows, retained_variation_rows = build_analysis_branch(long_rows, dmso_column, warnings, source_file, "with_outliers", False)
-    cleaned_long_rows, cleaned_summary_rows, cleaned_dmso_rows, cleaned_variation_rows = build_analysis_branch(long_rows, dmso_column, warnings, source_file, "without_outliers", True)
+    retained_long_rows, retained_summary_rows, retained_control_rows, retained_variation_rows = build_analysis_branch(long_rows, selected_control_column, warnings, source_file, "with_outliers", False)
+    cleaned_long_rows, cleaned_summary_rows, cleaned_control_rows, cleaned_variation_rows = build_analysis_branch(long_rows, selected_control_column, warnings, source_file, "without_outliers", True)
     base = source_file.rsplit(".", 1)[0]
     output_files = {
         f"{base}_normalized_long_with_outliers.csv": rows_to_csv(retained_long_rows),
@@ -486,8 +494,8 @@ def analyze_one_file(source_file, text):
         f"{base}_removed_outliers.csv": rows_to_csv(removed_outlier_rows),
         f"{base}_summary_by_date_condition_with_outliers.csv": rows_to_csv(retained_summary_rows),
         f"{base}_summary_by_date_condition_without_outliers.csv": rows_to_csv(cleaned_summary_rows),
-        f"{base}_dmso_anchor_by_date_with_outliers.csv": rows_to_csv(retained_dmso_rows),
-        f"{base}_dmso_anchor_by_date_without_outliers.csv": rows_to_csv(cleaned_dmso_rows),
+        f"{base}_control_anchor_by_date_with_outliers.csv": rows_to_csv(retained_control_rows),
+        f"{base}_control_anchor_by_date_without_outliers.csv": rows_to_csv(cleaned_control_rows),
         f"{base}_variation_by_condition_with_outliers.csv": rows_to_csv(retained_variation_rows),
         f"{base}_variation_by_condition_without_outliers.csv": rows_to_csv(cleaned_variation_rows),
         f"{base}_warnings.csv": rows_to_csv(warnings),
@@ -501,12 +509,13 @@ def analyze_one_file(source_file, text):
             "warning_count": len(warnings),
             "n_dates": len(sorted({row["acquisition_date"] for row in retained_long_rows})),
             "n_conditions": len(sorted({row["condition_original"] for row in retained_long_rows})),
+            "control_column": selected_control_column,
         },
         "warnings": warnings,
         "outputs": output_files,
         "branches": {
-            "with_outliers": {"long_rows": retained_long_rows, "summary_rows": retained_summary_rows, "dmso_rows": retained_dmso_rows, "variation_rows": retained_variation_rows},
-            "without_outliers": {"long_rows": cleaned_long_rows, "summary_rows": cleaned_summary_rows, "dmso_rows": cleaned_dmso_rows, "variation_rows": cleaned_variation_rows},
+            "with_outliers": {"long_rows": retained_long_rows, "summary_rows": retained_summary_rows, "control_rows": retained_control_rows, "variation_rows": retained_variation_rows},
+            "without_outliers": {"long_rows": cleaned_long_rows, "summary_rows": cleaned_summary_rows, "control_rows": cleaned_control_rows, "variation_rows": cleaned_variation_rows},
         },
     }
 
@@ -515,13 +524,14 @@ def analyze_file_payload(payload_json, progress_cb=None):
     import json
     payload = json.loads(payload_json)
     files = payload.get("files", [])
+    control_overrides = payload.get("control_overrides", {})
     results = []
     ignored_files = payload.get("ignored_files", [])
     total = max(1, len(files))
     for index, item in enumerate(files):
         if progress_cb is not None:
             progress_cb(f"Analyzing {item['name']} ({index + 1}/{total})…", int(10 + 80 * index / total))
-        results.append(analyze_one_file(item["name"], item["text"]))
+        results.append(analyze_one_file(item["name"], item["text"], control_overrides.get(item["name"])))
     if progress_cb is not None:
         progress_cb("Finalizing browser outputs…", 96)
     return {

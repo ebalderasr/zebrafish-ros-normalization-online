@@ -9,7 +9,10 @@ Aplicación web estática para normalizar y analizar datos de fluorescencia DCF 
 - acepta múltiples archivos `.csv`;
 - ignora automáticamente archivos que no sean `.csv`;
 - procesa cada archivo por separado;
-- normaliza por fecha usando el DMSO del mismo día;
+- detecta automáticamente columnas de fecha y condiciones;
+- permite elegir una columna de control por archivo;
+- usa `DMSO` por defecto cuando esa columna existe, pero no lo exige;
+- normaliza por fecha usando el control seleccionado del mismo día;
 - detecta outliers por `fecha × condición`;
 - produce ramas paralelas `with_outliers` y `without_outliers`;
 - muestra gráficas interactivas y warnings;
@@ -51,3 +54,4 @@ Pasos típicos:
 - La primera carga de Pyodide puede tardar varios segundos.
 - La app descarga dependencias desde CDN.
 - El procesamiento ocurre completamente en el navegador del usuario.
+- La app requiere una columna de fecha detectable y al menos una columna de condición/control por archivo.

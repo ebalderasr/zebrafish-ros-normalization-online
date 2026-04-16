@@ -11,6 +11,8 @@ let elProcessSection, elProcessBar, elProcessMsg;
 let elSelectedFilesList, elSelectedFilesCount;
 let elIgnoredFilesBox, elIgnoredFilesList;
 let elResultsSection, elRunSummaryCards, elFileTabs, elFileTabContent, elDownloadAllBtn;
+let elControlModalList, elConfirmControlsBtn;
+let controlModal = null;
 
 const SET2 = ["#66c2a5", "#fc8d62", "#8da0cb", "#e78ac3", "#a6d854", "#ffd92f", "#e5c494", "#b3b3b3"];
 const MARKERS = ["circle", "square", "triangle-up", "diamond", "cross", "x", "triangle-down", "triangle-left", "triangle-right", "star"];
@@ -36,9 +38,13 @@ document.addEventListener("DOMContentLoaded", () => {
   elFileTabs = document.getElementById("file-tabs");
   elFileTabContent = document.getElementById("file-tab-content");
   elDownloadAllBtn = document.getElementById("download-all-btn");
+  elControlModalList = document.getElementById("control-modal-list");
+  elConfirmControlsBtn = document.getElementById("confirm-controls-btn");
+  controlModal = new bootstrap.Modal(document.getElementById("controlModal"));
 
   setupDropZone();
-  elAnalyzeBtn.addEventListener("click", analyzeSelectedFiles);
+  elAnalyzeBtn.addEventListener("click", openControlModal);
+  elConfirmControlsBtn.addEventListener("click", analyzeSelectedFiles);
   elDownloadAllBtn.addEventListener("click", downloadAllOutputsZip);
   initPyodide();
 });
@@ -98,25 +104,30 @@ function setupDropZone() {
   elDropZone.addEventListener("dragleave", () => {
     elDropZone.classList.remove("drag-over");
   });
-  elDropZone.addEventListener("drop", (e) => {
+  elDropZone.addEventListener("drop", async (e) => {
     e.preventDefault();
     elDropZone.classList.remove("drag-over");
-    handleIncomingFiles(Array.from(e.dataTransfer.files || []));
+    await handleIncomingFiles(Array.from(e.dataTransfer.files || []));
   });
   elDropZone.addEventListener("click", () => elFileInput.click());
-  elFileInput.addEventListener("change", (e) => {
-    handleIncomingFiles(Array.from(e.target.files || []));
+  elFileInput.addEventListener("change", async (e) => {
+    await handleIncomingFiles(Array.from(e.target.files || []));
   });
 }
 
-function handleIncomingFiles(files) {
+async function handleIncomingFiles(files) {
   const csvFiles = [];
   const ignored = [];
   for (const file of files) {
     if (file.name.toLowerCase().endsWith(".csv")) csvFiles.push(file);
     else ignored.push(file.name);
   }
-  selectedFiles = csvFiles;
+  const prepared = [];
+  for (const file of csvFiles) {
+    const text = await file.text();
+    prepared.push(buildFileSelectionState(file, text));
+  }
+  selectedFiles = prepared;
   ignoredFiles = ignored;
   renderSelectedFiles();
 }
@@ -129,15 +140,18 @@ function renderSelectedFiles() {
     elAnalyzeBtn.disabled = true;
     elAnalyzeHint.textContent = "Select one or more CSV files to continue";
   } else {
+    const invalidSelections = selectedFiles.filter((item) => !item.dateColumn || !item.conditionColumns.length || !item.controlColumn);
     elSelectedFilesList.classList.remove("empty");
-    elSelectedFilesList.innerHTML = selectedFiles.map((file) => `
+    elSelectedFilesList.innerHTML = selectedFiles.map((item) => `
       <div class="selected-file-item">
-        <span class="file-chip-name">${escapeHtml(file.name)}</span>
-        <span class="file-chip-type">${formatBytes(file.size)}</span>
+        <span class="file-chip-name">${escapeHtml(item.name)}</span>
+        <span class="file-chip-type">${formatBytes(item.file.size)}</span>
       </div>
     `).join("");
-    elAnalyzeBtn.disabled = false;
-    elAnalyzeHint.textContent = "Ready to analyze in the browser";
+    elAnalyzeBtn.disabled = invalidSelections.length > 0;
+    elAnalyzeHint.textContent = invalidSelections.length
+      ? "At least one file is missing a detectable date column or condition columns"
+      : "Click Analyze files to choose one control column per file";
   }
   if (ignoredFiles.length) {
     elIgnoredFilesBox.classList.remove("d-none");
@@ -148,19 +162,57 @@ function renderSelectedFiles() {
   }
 }
 
+function renderControlSelector(item, index) {
+  const dateLabel = item.dateColumn || "Not detected";
+  const candidates = item.conditionColumns || [];
+  const options = candidates.length
+    ? candidates.map((column) => `<option value="${escapeHtml(column)}" ${column === item.controlColumn ? "selected" : ""}>${escapeHtml(column)}</option>`).join("")
+    : `<option value="">No valid condition columns detected</option>`;
+  return `
+    <div class="selected-file-item" style="display:block;">
+      <div style="display:flex; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:10px;">
+        <span class="file-chip-name">${escapeHtml(item.name)}</span>
+        <span class="file-chip-type">Date: ${escapeHtml(dateLabel)}</span>
+      </div>
+      <div style="margin-bottom:10px; color:${item.dateColumn && candidates.length ? "var(--md-muted)" : "var(--md-error)"}; font-size:0.92rem;">
+        ${item.dateColumn ? "" : "No date-like column detected. "}
+        ${candidates.length ? "" : "No treatment/control columns detected."}
+      </div>
+      <label for="control-select-${index}" style="display:block; font-weight:600; margin-bottom:6px;">Control column</label>
+      <select id="control-select-${index}" class="form-select" data-file-index="${index}" ${candidates.length ? "" : "disabled"}>
+        ${options}
+      </select>
+      <div style="margin-top:8px; color:var(--md-muted); font-size:0.92rem;">
+        Detected conditions: ${candidates.length ? escapeHtml(candidates.join(", ")) : "none"}
+      </div>
+    </div>
+  `;
+}
+
 async function analyzeSelectedFiles() {
   if (!selectedFiles.length) return;
+  const controlOverrides = {};
+  for (let index = 0; index < selectedFiles.length; index += 1) {
+    const item = selectedFiles[index];
+    const selector = document.getElementById(`control-select-${index}`);
+    const controlColumn = selector ? selector.value : "";
+    if (!controlColumn) return;
+    item.controlColumn = controlColumn;
+    controlOverrides[item.name] = controlColumn;
+  }
+  controlModal.hide();
   hide(elUploadSection);
   hide(elResultsSection);
   show(elProcessSection);
   setProcessProgress("Reading selected files…", 5);
   try {
     const files = [];
-    for (const file of selectedFiles) {
-      files.push({ name: file.name, text: await file.text() });
+    for (let index = 0; index < selectedFiles.length; index += 1) {
+      const item = selectedFiles[index];
+      files.push({ name: item.name, text: item.text });
     }
     pyodide.globals.set("_progress_cb", (msg, pct) => setProcessProgress(msg, pct));
-    pyodide.globals.set("_payload_json", JSON.stringify({ files, ignored_files: ignoredFiles }));
+    pyodide.globals.set("_payload_json", JSON.stringify({ files, ignored_files: ignoredFiles, control_overrides: controlOverrides }));
     const result = await pyodide.runPythonAsync("analyze_file_payload(_payload_json, _progress_cb)");
     analysisResults = deepConvert(result);
     setProcessProgress("Rendering results…", 100);
@@ -176,6 +228,12 @@ async function analyzeSelectedFiles() {
       show(elUploadSection);
     }, 2500);
   }
+}
+
+function openControlModal() {
+  if (!selectedFiles.length) return;
+  elControlModalList.innerHTML = selectedFiles.map((item, index) => renderControlSelector(item, index)).join("");
+  controlModal.show();
 }
 
 function renderResults(payload) {
@@ -229,6 +287,7 @@ function renderFilePanel(item, fileIndex) {
     <div class="file-panel">
       <div class="file-summary-grid">
         <div class="file-summary-block"><div class="file-summary-title">Input file</div><div class="file-summary-main">${escapeHtml(item.source_file)}</div></div>
+        <div class="file-summary-block"><div class="file-summary-title">Selected control</div><div class="file-summary-main">${escapeHtml(item.summary.control_column || "NA")}</div></div>
         <div class="file-summary-block"><div class="file-summary-title">Rows with outliers</div><div class="file-summary-main">${item.summary.with_outliers_rows}</div></div>
         <div class="file-summary-block"><div class="file-summary-title">Rows without outliers</div><div class="file-summary-main">${item.summary.without_outliers_rows}</div></div>
         <div class="file-summary-block"><div class="file-summary-title">Removed outliers</div><div class="file-summary-main">${item.summary.removed_outliers_rows}</div></div>
@@ -253,11 +312,11 @@ function renderFilePanel(item, fileIndex) {
 function branchPlotsMarkup(fileIndex, branch) {
   const baseId = `${branch}-${fileIndex}`;
   return `
-    <div class="plots-grid">
-      <div class="plot-card"><div class="plot-card-header"><div><h3 class="plot-title">Raw distribution by condition</h3><p class="plot-subtitle">Each point is one embryo. DMSO is always shown first.</p></div></div><div class="plot-shell"><div id="plot-raw-${baseId}" class="plotly-host"></div><div id="legend-raw-${baseId}" class="legend-stack"></div></div></div>
+    <div class="plots-grid" data-branch="${branch}" data-file-index="${fileIndex}">
+      <div class="plot-card"><div class="plot-card-header"><div><h3 class="plot-title">Raw distribution by condition</h3><p class="plot-subtitle">Each point is one embryo. The selected control is always shown first.</p></div></div><div class="plot-shell"><div id="plot-raw-${baseId}" class="plotly-host"></div><div id="legend-raw-${baseId}" class="legend-stack"></div></div></div>
       <div class="plot-card"><div class="plot-card-header"><div><h3 class="plot-title">Raw median intensity across dates</h3><p class="plot-subtitle">Daily medians by condition before normalization.</p></div></div><div id="plot-rawline-${baseId}" class="plotly-host"></div></div>
-      <div class="plot-card"><div class="plot-card-header"><div><h3 class="plot-title">DMSO anchor shift across dates</h3><p class="plot-subtitle">Internal reference used to correct day-to-day acquisition shifts.</p></div></div><div class="plot-shell"><div id="plot-dmso-${baseId}" class="plotly-host"></div><div id="legend-dmso-${baseId}" class="legend-stack"></div></div></div>
-      <div class="plot-card"><div class="plot-card-header"><div><h3 class="plot-title">Normalized distribution by condition</h3><p class="plot-subtitle">Log2 ratios relative to the DMSO median from the same date.</p></div></div><div class="plot-shell"><div id="plot-norm-${baseId}" class="plotly-host"></div><div id="legend-norm-${baseId}" class="legend-stack"></div></div></div>
+      <div class="plot-card"><div class="plot-card-header"><div><h3 class="plot-title">Control anchor shift across dates</h3><p class="plot-subtitle">Internal reference used to correct day-to-day acquisition shifts.</p></div></div><div class="plot-shell"><div id="plot-control-${baseId}" class="plotly-host"></div><div id="legend-control-${baseId}" class="legend-stack"></div></div></div>
+      <div class="plot-card"><div class="plot-card-header"><div><h3 class="plot-title">Normalized distribution by condition</h3><p class="plot-subtitle">Log2 ratios relative to the selected control median from the same date.</p></div></div><div class="plot-shell"><div id="plot-norm-${baseId}" class="plotly-host"></div><div id="legend-norm-${baseId}" class="legend-stack"></div></div></div>
       <div class="plot-card"><div class="plot-card-header"><div><h3 class="plot-title">Variation reduction</h3><p class="plot-subtitle">Across-date CV of daily medians before and after normalization.</p></div></div><div id="plot-var-${baseId}" class="plotly-host"></div></div>
     </div>
   `;
@@ -268,8 +327,8 @@ function renderFilePanelPlots(item, fileIndex) {
     const branchData = item.branches[branch];
     renderCategoricalScatterChart(`plot-raw-${branch}-${fileIndex}`, `legend-raw-${branch}-${fileIndex}`, branchData.long_rows, "intensity", "Raw intensity", false);
     renderRawMedianLineChart(`plot-rawline-${branch}-${fileIndex}`, branchData.summary_rows);
-    renderDmsoAnchorChart(`plot-dmso-${branch}-${fileIndex}`, `legend-dmso-${branch}-${fileIndex}`, branchData.long_rows, branchData.dmso_rows);
-    renderCategoricalScatterChart(`plot-norm-${branch}-${fileIndex}`, `legend-norm-${branch}-${fileIndex}`, branchData.long_rows.filter((row) => row.log2fc_vs_dmso !== null), "log2fc_vs_dmso", "log2(intensity / DMSO median)", true);
+    renderControlAnchorChart(`plot-control-${branch}-${fileIndex}`, `legend-control-${branch}-${fileIndex}`, branchData.long_rows, branchData.control_rows, item.summary.control_column);
+    renderCategoricalScatterChart(`plot-norm-${branch}-${fileIndex}`, `legend-norm-${branch}-${fileIndex}`, branchData.long_rows.filter((row) => row.log2fc_vs_control !== null), "log2fc_vs_control", "log2(intensity / control median)", true);
     renderVariationChart(`plot-var-${branch}-${fileIndex}`, branchData.variation_rows);
   });
   document.querySelectorAll(`[data-file-index="${fileIndex}"][data-output-name]`).forEach((link) => {
@@ -291,9 +350,10 @@ function conditionOrder(rows) {
     entries.push({ key, label: row.condition_original });
   });
   entries.sort((a, b) => a.key.localeCompare(b.key));
-  const dmso = entries.filter((item) => item.label.trim().toLowerCase() === "dmso");
-  const others = entries.filter((item) => item.label.trim().toLowerCase() !== "dmso");
-  return [...dmso, ...others].map((item) => item.label);
+  const controlLabels = new Set(rows.filter((row) => row.is_control_condition).map((row) => row.condition_original));
+  const control = entries.filter((item) => controlLabels.has(item.label));
+  const others = entries.filter((item) => !controlLabels.has(item.label));
+  return [...control, ...others].map((item) => item.label);
 }
 
 function buildColorMap(labels) {
@@ -379,27 +439,32 @@ function renderRawMedianLineChart(plotId, summaryRows) {
   }, { responsive: true, displaylogo: false });
 }
 
-function renderDmsoAnchorChart(plotId, legendId, longRows, dmsoRows) {
+function renderControlAnchorChart(plotId, legendId, longRows, controlRows, controlColumn) {
   const plotEl = document.getElementById(plotId);
   const legendEl = document.getElementById(legendId);
   if (!plotEl || !legendEl) return;
-  const dmsoPoints = longRows.filter((row) => row.is_dmso_condition);
-  const order = dmsoRows.map((row) => row.acquisition_date);
+  const controlPoints = longRows.filter((row) => row.is_control_condition);
+  const order = controlRows.map((row) => row.acquisition_date);
+  if (!order.length) {
+    plotEl.innerHTML = "<p>No valid control anchor data available for this branch.</p>";
+    legendEl.innerHTML = "";
+    return;
+  }
   const xPositions = Object.fromEntries(order.map((label, index) => [label, index]));
   const colorMap = buildColorMap(order);
   const markerMap = buildDateMarkerMap(order);
   legendEl.innerHTML = `<div class="legend-box"><div class="legend-title">Date</div><div class="legend-items">${order.map((dateLabel) => `<div class="legend-item"><span class="legend-swatch" style="background:${colorMap[dateLabel]};"></span><span>${escapeHtml(dateLabel)}</span></div>`).join("")}</div></div>`;
   const traces = [];
   order.forEach((dateLabel) => {
-    const subset = dmsoPoints.filter((row) => row.acquisition_date === dateLabel);
+    const subset = controlPoints.filter((row) => row.acquisition_date === dateLabel);
     const x = subset.map((_, idx) => xPositions[dateLabel] + (((idx % 5) - 2) * 0.04));
     traces.push({ type: "scatter", mode: "markers", x, y: subset.map((row) => row.intensity), marker: { size: 11, color: colorMap[dateLabel], symbol: markerMap[dateLabel], line: { color: "#2d2d2d", width: 1.3 } }, showlegend: false });
   });
-  traces.push({ type: "scatter", mode: "lines+markers", x: order.map((dateLabel) => xPositions[dateLabel]), y: dmsoRows.map((row) => row.dmso_median), line: { color: "#000000", width: 2 }, marker: { color: "#000000", size: 8 }, showlegend: false });
+  traces.push({ type: "scatter", mode: "lines+markers", x: order.map((dateLabel) => xPositions[dateLabel]), y: controlRows.map((row) => row.control_median), line: { color: "#000000", width: 2 }, marker: { color: "#000000", size: 8 }, showlegend: false });
   Plotly.newPlot(plotEl, traces, {
     margin: { l: 70, r: 10, t: 10, b: 90 }, paper_bgcolor: "white", plot_bgcolor: "white", showlegend: false,
     xaxis: { tickmode: "array", tickvals: order.map((_, idx) => idx), ticktext: order, tickangle: -25, title: "Acquisition date", range: [-0.5, order.length - 0.5] },
-    yaxis: { title: "Raw DMSO intensity", gridcolor: "#e7ebf0" },
+    yaxis: { title: `Raw control intensity (${controlColumn || "control"})`, gridcolor: "#e7ebf0" },
   }, { responsive: true, displaylogo: false });
 }
 
@@ -508,6 +573,103 @@ function formatNumber(value) {
 
 function escapeHtml(text) {
   return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+}
+
+function normalizeLabel(text) {
+  return String(text || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function tokenizeLabel(text) {
+  return new Set(normalizeLabel(text).split("_").filter(Boolean));
+}
+
+function detectDelimiterFromText(text) {
+  const sample = (text || "").slice(0, 2048);
+  const firstLine = sample.split(/\r?\n/, 1)[0] || "";
+  const candidates = [",", ";", "\t", "|"];
+  let best = ",";
+  let bestCount = -1;
+  candidates.forEach((candidate) => {
+    const count = firstLine.split(candidate).length - 1;
+    if (count > bestCount) {
+      best = candidate;
+      bestCount = count;
+    }
+  });
+  return best;
+}
+
+function parseCsvLine(line, delimiter) {
+  const out = [];
+  let current = "";
+  let inQuotes = false;
+  for (let idx = 0; idx < line.length; idx += 1) {
+    const ch = line[idx];
+    if (ch === '"') {
+      if (inQuotes && line[idx + 1] === '"') {
+        current += '"';
+        idx += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (ch === delimiter && !inQuotes) {
+      out.push(current);
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  out.push(current);
+  return out.map((value) => value.trim());
+}
+
+function detectDateColumn(headers) {
+  const exact = [];
+  const fuzzy = [];
+  headers.forEach((header) => {
+    const normalized = normalizeLabel(header);
+    const tokens = tokenizeLabel(header);
+    if (["fecha", "fecha_adquisicion", "fecha_de_adquisicion", "date", "acquisition_date"].includes(normalized)) exact.push(header);
+    else if (tokens.has("fecha") || tokens.has("date")) fuzzy.push(header);
+  });
+  const matches = exact.length ? exact : fuzzy;
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function defaultControlColumn(headers, dateColumn) {
+  const candidates = headers.filter((header) => header && header !== dateColumn);
+  const exact = candidates.filter((header) => normalizeLabel(header) === "dmso");
+  if (exact.length === 1) return exact[0];
+  const fuzzy = candidates.filter((header) => {
+    const normalized = normalizeLabel(header);
+    return normalized.includes("dmso") || tokenizeLabel(header).has("dmso");
+  });
+  if (fuzzy.length === 1) return fuzzy[0];
+  return candidates[0] || "";
+}
+
+function buildFileSelectionState(file, text) {
+  const delimiter = detectDelimiterFromText(text);
+  const firstLine = (text || "").split(/\r?\n/).find((line) => String(line).trim() !== "") || "";
+  const headers = parseCsvLine(firstLine, delimiter).map((header, index) => header || `unnamed_column_${index + 1}`);
+  const dateColumn = detectDateColumn(headers);
+  const conditionColumns = headers.filter((header) => header !== dateColumn);
+  return {
+    file,
+    name: file.name,
+    text,
+    headers,
+    dateColumn,
+    conditionColumns,
+    controlColumn: defaultControlColumn(headers, dateColumn),
+  };
 }
 
 function show(el) { el.classList.remove("d-none"); }

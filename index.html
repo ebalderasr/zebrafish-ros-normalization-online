@@ -59,7 +59,7 @@
       <div class="section-kicker">Browser analysis</div>
       <h2 class="md-card-title app-headline">Upload one or more CSV files</h2>
       <p class="md-card-subtitle">
-        Each CSV is analyzed independently. Normalization is performed by date using the DMSO control from the same day inside the same file.
+        Each CSV is analyzed independently. Normalization is performed by date using the selected control from the same day inside the same file.
       </p>
 
       <div id="drop-zone" class="md-drop-zone">
@@ -95,13 +95,13 @@
       <div class="settings-grid">
         <div class="settings-card">
           <h3>Normalization</h3>
-          <p>For each date \(d\), the app computes:</p>
+          <p>For each date \(d\), the app normalizes against the user-selected control column from the same day. If a `DMSO` column is detected, it is preselected by default.</p>
           <div class="math-block">
             $$
-            \widetilde{I}_{\mathrm{DMSO},d} = \mathrm{median}\left(I_{\mathrm{DMSO},d}\right)
+            \widetilde{I}_{\mathrm{control},d} = \mathrm{median}\left(I_{\mathrm{control},d}\right)
             $$
             $$
-            \mathrm{ratio}_{i,d} = \frac{I_{i,d}}{\widetilde{I}_{\mathrm{DMSO},d}}
+            \mathrm{ratio}_{i,d} = \frac{I_{i,d}}{\widetilde{I}_{\mathrm{control},d}}
             $$
             $$
             \log_2\mathrm{FC}_{i,d} = \log_2\left(\mathrm{ratio}_{i,d}\right)
@@ -181,13 +181,13 @@
           <h3>Input model</h3>
           <p>Each CSV contains a date column and one column per treatment. Every non-empty cell is interpreted as one independent embryo.</p>
           <h3>Normalization by date</h3>
-          <p>Within each file and each acquisition date, DMSO is treated as the internal anchor for that day.</p>
+          <p>Within each file and each acquisition date, the selected control column is treated as the internal anchor for that day. If a `DMSO` column is detected, the interface selects it by default, but the user can choose another control when needed.</p>
           <div class="math-block">
             $$
-            \widetilde{I}_{\mathrm{DMSO},d} = \mathrm{median}\left(I_{\mathrm{DMSO},d}\right)
+            \widetilde{I}_{\mathrm{control},d} = \mathrm{median}\left(I_{\mathrm{control},d}\right)
             $$
             $$
-            \mathrm{ratio}_{i,d} = \frac{I_{i,d}}{\widetilde{I}_{\mathrm{DMSO},d}}
+            \mathrm{ratio}_{i,d} = \frac{I_{i,d}}{\widetilde{I}_{\mathrm{control},d}}
             $$
             $$
             \log_2\mathrm{FC}_{i,d} = \log_2\left(\mathrm{ratio}_{i,d}\right)
@@ -206,6 +206,27 @@
           </div>
           <h3>Outputs</h3>
           <p>Each uploaded CSV is processed independently. The browser app lets you inspect plots, warnings and downloadable CSV tables for each file.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal fade" id="controlModal" tabindex="-1" aria-labelledby="controlModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="controlModalLabel">Choose control column</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <p class="md-card-subtitle" style="margin-bottom: 18px;">
+            Select one control column for each file before running the analysis. If a <code>DMSO</code> column is detected, it is preselected by default.
+          </p>
+          <div id="control-modal-list" class="selected-files-list"></div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" id="confirm-controls-btn" class="btn-md-primary">Run analysis</button>
         </div>
       </div>
     </div>
