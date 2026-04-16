@@ -261,24 +261,28 @@ function summaryCard(label, value) {
 }
 
 function renderFileTabs(results) {
-  elFileTabs.innerHTML = results.map((item, index) => `
+  const safeResults = Array.isArray(results) ? results : [];
+  elFileTabs.innerHTML = safeResults.map((item, index) => `
     <li class="nav-item" role="presentation">
       <button class="nav-link ${index === 0 ? "active" : ""}" id="file-tab-${index}" data-bs-toggle="tab" data-bs-target="#file-pane-${index}" type="button" role="tab">
         ${escapeHtml(item.source_file)}
       </button>
     </li>
   `).join("");
-  elFileTabContent.innerHTML = results.map((item, index) => `
+  elFileTabContent.innerHTML = safeResults.map((item, index) => `
     <div class="tab-pane fade ${index === 0 ? "show active" : ""}" id="file-pane-${index}" role="tabpanel">
       ${renderFilePanel(item, index)}
     </div>
   `).join("");
-  results.forEach((item, index) => renderFilePanelPlots(item, index));
+  safeResults.forEach((item, index) => renderFilePanelPlots(item, index));
 }
 
 function renderFilePanel(item, fileIndex) {
-  const warningLines = item.warnings.map((warning) => formatWarningLine(warning)).join("");
-  const outputLinks = Object.entries(item.outputs).map(([filename]) => `
+  const warnings = Array.isArray(item.warnings) ? item.warnings : [];
+  const outputs = item.outputs || {};
+  const summary = item.summary || {};
+  const warningLines = warnings.map((warning) => formatWarningLine(warning)).join("");
+  const outputLinks = Object.entries(outputs).map(([filename]) => `
     <a href="#" class="download-link" data-file-index="${fileIndex}" data-output-name="${escapeHtml(filename)}">
       <span>${escapeHtml(filename)}</span><span class="download-meta">CSV</span>
     </a>
@@ -287,11 +291,11 @@ function renderFilePanel(item, fileIndex) {
     <div class="file-panel">
       <div class="file-summary-grid">
         <div class="file-summary-block"><div class="file-summary-title">Input file</div><div class="file-summary-main">${escapeHtml(item.source_file)}</div></div>
-        <div class="file-summary-block"><div class="file-summary-title">Selected control</div><div class="file-summary-main">${escapeHtml(item.summary.control_column || "NA")}</div></div>
-        <div class="file-summary-block"><div class="file-summary-title">Rows with outliers</div><div class="file-summary-main">${item.summary.with_outliers_rows}</div></div>
-        <div class="file-summary-block"><div class="file-summary-title">Rows without outliers</div><div class="file-summary-main">${item.summary.without_outliers_rows}</div></div>
-        <div class="file-summary-block"><div class="file-summary-title">Removed outliers</div><div class="file-summary-main">${item.summary.removed_outliers_rows}</div></div>
-        <div class="file-summary-block"><div class="file-summary-title">Warnings</div><div class="file-summary-main">${item.summary.warning_count}</div></div>
+        <div class="file-summary-block"><div class="file-summary-title">Selected control</div><div class="file-summary-main">${escapeHtml(summary.control_column || "NA")}</div></div>
+        <div class="file-summary-block"><div class="file-summary-title">Rows with outliers</div><div class="file-summary-main">${summary.with_outliers_rows ?? "NA"}</div></div>
+        <div class="file-summary-block"><div class="file-summary-title">Rows without outliers</div><div class="file-summary-main">${summary.without_outliers_rows ?? "NA"}</div></div>
+        <div class="file-summary-block"><div class="file-summary-title">Removed outliers</div><div class="file-summary-main">${summary.removed_outliers_rows ?? "NA"}</div></div>
+        <div class="file-summary-block"><div class="file-summary-title">Warnings</div><div class="file-summary-main">${summary.warning_count ?? warnings.length}</div></div>
       </div>
       <div class="download-box"><div class="file-summary-title">Download per-file outputs</div><div class="download-files">${outputLinks}</div></div>
       <div class="warnings-box"><div class="file-summary-title">Warnings and processing notes</div><div class="warnings-list">${warningLines || '<div class="warning-line">No warnings.</div>'}</div></div>
@@ -324,10 +328,10 @@ function branchPlotsMarkup(fileIndex, branch) {
 
 function renderFilePanelPlots(item, fileIndex) {
   ["with_outliers", "without_outliers"].forEach((branch) => {
-    const branchData = item.branches[branch];
+    const branchData = (item.branches && item.branches[branch]) || { long_rows: [], summary_rows: [], control_rows: [], variation_rows: [] };
     renderCategoricalScatterChart(`plot-raw-${branch}-${fileIndex}`, `legend-raw-${branch}-${fileIndex}`, branchData.long_rows, "intensity", "Raw intensity", false);
     renderRawMedianLineChart(`plot-rawline-${branch}-${fileIndex}`, branchData.summary_rows);
-    renderControlAnchorChart(`plot-control-${branch}-${fileIndex}`, `legend-control-${branch}-${fileIndex}`, branchData.long_rows, branchData.control_rows, item.summary.control_column);
+    renderControlAnchorChart(`plot-control-${branch}-${fileIndex}`, `legend-control-${branch}-${fileIndex}`, branchData.long_rows, branchData.control_rows, item.summary?.control_column);
     renderCategoricalScatterChart(`plot-norm-${branch}-${fileIndex}`, `legend-norm-${branch}-${fileIndex}`, branchData.long_rows.filter((row) => row.log2fc_vs_control !== null), "log2fc_vs_control", "log2(intensity / control median)", true);
     renderVariationChart(`plot-var-${branch}-${fileIndex}`, branchData.variation_rows);
   });
@@ -341,16 +345,17 @@ function renderFilePanelPlots(item, fileIndex) {
 }
 
 function conditionOrder(rows) {
+  const safeRows = Array.isArray(rows) ? rows : [];
   const entries = [];
   const seen = new Set();
-  rows.forEach((row) => {
+  safeRows.forEach((row) => {
     const key = row.condition_key;
     if (seen.has(key)) return;
     seen.add(key);
     entries.push({ key, label: row.condition_original });
   });
   entries.sort((a, b) => a.key.localeCompare(b.key));
-  const controlLabels = new Set(rows.filter((row) => row.is_control_condition).map((row) => row.condition_original));
+  const controlLabels = new Set(safeRows.filter((row) => row.is_control_condition).map((row) => row.condition_original));
   const control = entries.filter((item) => controlLabels.has(item.label));
   const others = entries.filter((item) => !controlLabels.has(item.label));
   return [...control, ...others].map((item) => item.label);
@@ -382,21 +387,22 @@ function renderCategoricalScatterChart(plotId, legendId, rows, yKey, yTitle, dra
   const plotEl = document.getElementById(plotId);
   const legendEl = document.getElementById(legendId);
   if (!plotEl || !legendEl) return;
-  if (!rows.length) {
+  const safeRows = Array.isArray(rows) ? rows : [];
+  if (!safeRows.length) {
     plotEl.innerHTML = "<p>No data available for this branch.</p>";
     legendEl.innerHTML = "";
     return;
   }
-  const order = conditionOrder(rows);
+  const order = conditionOrder(safeRows);
   const xPositions = Object.fromEntries(order.map((label, index) => [label, index]));
   const colorMap = buildColorMap(order);
-  const dateLabels = [...new Set(rows.map((row) => row.acquisition_date))].sort();
+  const dateLabels = [...new Set(safeRows.map((row) => row.acquisition_date))].sort();
   const markerMap = buildDateMarkerMap(dateLabels);
   legendEl.innerHTML = buildPlotLegendHtml(colorMap, markerMap);
   const traces = [];
   dateLabels.forEach((dateLabel) => {
     order.forEach((conditionLabel) => {
-      const subset = rows.filter((row) => row.acquisition_date === dateLabel && row.condition_original === conditionLabel && row[yKey] !== null);
+      const subset = safeRows.filter((row) => row.acquisition_date === dateLabel && row.condition_original === conditionLabel && row[yKey] !== null);
       if (!subset.length) return;
       const x = subset.map((_, idx) => xPositions[conditionLabel] + (((idx % 5) - 2) * 0.05));
       traces.push({
@@ -410,7 +416,7 @@ function renderCategoricalScatterChart(plotId, legendId, rows, yKey, yTitle, dra
   });
   const shapes = [];
   order.forEach((conditionLabel) => {
-    const values = rows.filter((row) => row.condition_original === conditionLabel && row[yKey] !== null).map((row) => row[yKey]);
+    const values = safeRows.filter((row) => row.condition_original === conditionLabel && row[yKey] !== null).map((row) => row[yKey]);
     if (!values.length) return;
     const med = median(values);
     const xpos = xPositions[conditionLabel];
@@ -427,10 +433,15 @@ function renderCategoricalScatterChart(plotId, legendId, rows, yKey, yTitle, dra
 function renderRawMedianLineChart(plotId, summaryRows) {
   const plotEl = document.getElementById(plotId);
   if (!plotEl) return;
-  const order = conditionOrder(summaryRows);
+  const safeRows = Array.isArray(summaryRows) ? summaryRows : [];
+  if (!safeRows.length) {
+    plotEl.innerHTML = "<p>No summary data available for this branch.</p>";
+    return;
+  }
+  const order = conditionOrder(safeRows);
   const colorMap = buildColorMap(order);
   const traces = order.map((conditionLabel) => {
-    const subset = summaryRows.filter((row) => row.condition_original === conditionLabel).sort((a, b) => a.acquisition_date.localeCompare(b.acquisition_date));
+    const subset = safeRows.filter((row) => row.condition_original === conditionLabel).sort((a, b) => a.acquisition_date.localeCompare(b.acquisition_date));
     return { type: "scatter", mode: "lines+markers", x: subset.map((row) => row.acquisition_date), y: subset.map((row) => row.raw_median), name: conditionLabel, line: { color: colorMap[conditionLabel], width: 3 }, marker: { color: colorMap[conditionLabel], size: 8 } };
   });
   Plotly.newPlot(plotEl, traces, {
@@ -443,8 +454,10 @@ function renderControlAnchorChart(plotId, legendId, longRows, controlRows, contr
   const plotEl = document.getElementById(plotId);
   const legendEl = document.getElementById(legendId);
   if (!plotEl || !legendEl) return;
-  const controlPoints = longRows.filter((row) => row.is_control_condition);
-  const order = controlRows.map((row) => row.acquisition_date);
+  const safeLongRows = Array.isArray(longRows) ? longRows : [];
+  const safeControlRows = Array.isArray(controlRows) ? controlRows : [];
+  const controlPoints = safeLongRows.filter((row) => row.is_control_condition);
+  const order = safeControlRows.map((row) => row.acquisition_date);
   if (!order.length) {
     plotEl.innerHTML = "<p>No valid control anchor data available for this branch.</p>";
     legendEl.innerHTML = "";
@@ -460,7 +473,7 @@ function renderControlAnchorChart(plotId, legendId, longRows, controlRows, contr
     const x = subset.map((_, idx) => xPositions[dateLabel] + (((idx % 5) - 2) * 0.04));
     traces.push({ type: "scatter", mode: "markers", x, y: subset.map((row) => row.intensity), marker: { size: 11, color: colorMap[dateLabel], symbol: markerMap[dateLabel], line: { color: "#2d2d2d", width: 1.3 } }, showlegend: false });
   });
-  traces.push({ type: "scatter", mode: "lines+markers", x: order.map((dateLabel) => xPositions[dateLabel]), y: controlRows.map((row) => row.control_median), line: { color: "#000000", width: 2 }, marker: { color: "#000000", size: 8 }, showlegend: false });
+  traces.push({ type: "scatter", mode: "lines+markers", x: order.map((dateLabel) => xPositions[dateLabel]), y: safeControlRows.map((row) => row.control_median), line: { color: "#000000", width: 2 }, marker: { color: "#000000", size: 8 }, showlegend: false });
   Plotly.newPlot(plotEl, traces, {
     margin: { l: 70, r: 10, t: 10, b: 90 }, paper_bgcolor: "white", plot_bgcolor: "white", showlegend: false,
     xaxis: { tickmode: "array", tickvals: order.map((_, idx) => idx), ticktext: order, tickangle: -25, title: "Acquisition date", range: [-0.5, order.length - 0.5] },
@@ -471,7 +484,8 @@ function renderControlAnchorChart(plotId, legendId, longRows, controlRows, contr
 function renderVariationChart(plotId, variationRows) {
   const plotEl = document.getElementById(plotId);
   if (!plotEl) return;
-  const usable = variationRows.filter((row) => row.raw_daily_median_cv !== null && row.normalized_daily_median_cv !== null);
+  const safeRows = Array.isArray(variationRows) ? variationRows : [];
+  const usable = safeRows.filter((row) => row.raw_daily_median_cv !== null && row.normalized_daily_median_cv !== null);
   if (!usable.length) {
     plotEl.innerHTML = "<p>No sufficient across-date data for this summary.</p>";
     return;
