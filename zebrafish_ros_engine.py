@@ -1,0 +1,531 @@
+from __future__ import annotations
+
+import copy
+import csv
+import difflib
+import io
+import math
+import re
+import unicodedata
+from collections import defaultdict
+
+import numpy as np
+
+DATE_COLUMN_HINTS = {"fecha", "fecha_adquisicion", "fecha_de_adquisicion", "date", "acquisition_date"}
+MIN_DMSO_N_RECOMMENDED = 3
+SIMILAR_LABEL_THRESHOLD = 0.92
+
+
+def normalize_label(label):
+    text = "" if label is None else str(label)
+    text = text.strip()
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9]+", "_", text)
+    text = re.sub(r"_+", "_", text).strip("_")
+    return text
+
+
+def tokenize_label(label):
+    return {token for token in normalize_label(label).split("_") if token}
+
+
+def uniquify_labels(labels):
+    counts = {}
+    result = {}
+    for label in labels:
+        base = normalize_label(label) or "unnamed_condition"
+        counts[base] = counts.get(base, 0) + 1
+        result[label] = base if counts[base] == 1 else f"{base}__{counts[base]}"
+    return result
+
+
+def parse_measurement(value):
+    if value is None:
+        return None, ""
+    raw = str(value).strip()
+    if raw == "":
+        return None, raw
+    lowered = raw.lower()
+    if lowered in {"nan", "na", "n/a", "none", "null", "nd", "s/d"}:
+        return None, raw
+    clean = raw.replace("\u00a0", "").replace(" ", "")
+    if "," in clean and "." in clean:
+        if clean.rfind(",") > clean.rfind("."):
+            clean = clean.replace(".", "").replace(",", ".")
+        else:
+            clean = clean.replace(",", "")
+    elif "," in clean:
+        clean = clean.replace(".", "").replace(",", ".")
+    try:
+        return float(clean), raw
+    except ValueError:
+        return None, raw
+
+
+def parse_yy_mm_dd(raw_value):
+    if raw_value is None:
+        return None, ""
+    raw = str(raw_value).strip()
+    if raw == "":
+        return None, raw
+    if re.fullmatch(r"\d+\.0", raw):
+        raw = raw[:-2]
+    digits = re.sub(r"\D", "", raw)
+    if len(digits) != 6:
+        return None, raw
+    from datetime import datetime
+    try:
+        parsed = datetime.strptime(digits, "%y%m%d").date()
+        return parsed.isoformat(), raw
+    except ValueError:
+        return None, raw
+
+
+def safe_mean(values):
+    if not values:
+        return None
+    return float(np.mean(np.asarray(values, dtype=float)))
+
+
+def safe_median(values):
+    if not values:
+        return None
+    return float(np.median(np.asarray(values, dtype=float)))
+
+
+def safe_std(values):
+    if len(values) < 2:
+        return None
+    return float(np.std(np.asarray(values, dtype=float), ddof=1))
+
+
+def safe_mad(values):
+    if not values:
+        return None
+    arr = np.asarray(values, dtype=float)
+    median = float(np.median(arr))
+    return float(np.median(np.abs(arr - median)))
+
+
+def safe_iqr(values):
+    if not values:
+        return None
+    arr = np.asarray(values, dtype=float)
+    q1 = float(np.percentile(arr, 25))
+    q3 = float(np.percentile(arr, 75))
+    return q3 - q1
+
+
+def safe_cv(values):
+    if len(values) < 2:
+        return None
+    mean = safe_mean(values)
+    std = safe_std(values)
+    if mean in (None, 0.0) or std is None:
+        return None
+    return std / mean
+
+
+def compute_iqr_bounds(values):
+    if len(values) < 4:
+        return None
+    arr = np.asarray(values, dtype=float)
+    q1 = float(np.percentile(arr, 25))
+    q3 = float(np.percentile(arr, 75))
+    iqr = q3 - q1
+    return q1 - 1.5 * iqr, q3 + 1.5 * iqr
+
+
+def log2_or_none(value):
+    if value is None or value <= 0:
+        return None
+    return math.log2(value)
+
+
+def add_warning(warnings, level, code, message, **kwargs):
+    warnings.append({
+        "level": level,
+        "code": code,
+        "message": message,
+        "source_file": kwargs.get("source_file", ""),
+        "row_number": kwargs.get("row_number", ""),
+        "column_name": kwargs.get("column_name", ""),
+        "value": kwargs.get("value", ""),
+        "date_raw": kwargs.get("date_raw", ""),
+    })
+
+
+def read_csv_text(text, source_file, warnings):
+    sample = text[:4096]
+    delimiter = ","
+    try:
+        delimiter = csv.Sniffer().sniff(sample, delimiters=",;\t|").delimiter
+    except csv.Error:
+        pass
+    rows = list(csv.reader(io.StringIO(text), delimiter=delimiter))
+    if not rows:
+        raise ValueError(f"{source_file} is empty.")
+    headers = [cell.strip() for cell in rows[0]]
+    normalized_headers = []
+    for index, name in enumerate(headers, start=1):
+        if name:
+            normalized_headers.append(name)
+        else:
+            placeholder = f"unnamed_column_{index}"
+            normalized_headers.append(placeholder)
+            add_warning(warnings, "warning", "blank_header", f"Blank header replaced with {placeholder}.", source_file=source_file, column_name=placeholder)
+    parsed_rows = []
+    width = len(normalized_headers)
+    for row_index, row in enumerate(rows[1:], start=2):
+        if not any(str(cell).strip() for cell in row):
+            continue
+        if len(row) < width:
+            add_warning(warnings, "warning", "short_row", f"Row padded to {width} columns.", source_file=source_file, row_number=row_index)
+            row = row + [""] * (width - len(row))
+        elif len(row) > width:
+            add_warning(warnings, "warning", "wide_row", "Extra cells were ignored.", source_file=source_file, row_number=row_index)
+            row = row[:width]
+        record = dict(zip(normalized_headers, row))
+        record["__row_number__"] = str(row_index)
+        parsed_rows.append(record)
+    return {"headers": normalized_headers, "rows": parsed_rows}
+
+
+def detect_date_column(headers):
+    exact_matches, fuzzy_matches = [], []
+    for header in headers:
+        normalized = normalize_label(header)
+        tokens = tokenize_label(header)
+        if normalized in DATE_COLUMN_HINTS:
+            exact_matches.append(header)
+        elif "fecha" in tokens or "date" in tokens:
+            fuzzy_matches.append(header)
+    matches = exact_matches or fuzzy_matches
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise ValueError(f"Multiple date-like columns detected: {matches}")
+    raise ValueError("No date column detected.")
+
+
+def detect_dmso_column(headers, date_column):
+    exact_matches, fuzzy_matches = [], []
+    for header in headers:
+        if header == date_column:
+            continue
+        normalized = normalize_label(header)
+        tokens = tokenize_label(header)
+        if normalized == "dmso":
+            exact_matches.append(header)
+        elif "dmso" in tokens or "dmso" in normalized:
+            fuzzy_matches.append(header)
+    matches = exact_matches or fuzzy_matches
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise ValueError(f"Multiple DMSO-like columns detected: {matches}")
+    raise ValueError("No DMSO column detected.")
+
+
+def warn_on_similar_columns(condition_headers, warnings, source_file):
+    normalized_headers = {header: normalize_label(header) for header in condition_headers}
+    by_normalized = defaultdict(list)
+    for original, normalized in normalized_headers.items():
+        by_normalized[normalized].append(original)
+    for normalized, originals in by_normalized.items():
+        if len(originals) > 1:
+            add_warning(warnings, "warning", "duplicate_condition_normalized_name", f"Multiple columns collapse to '{normalized}': {originals}.", source_file=source_file)
+    checked_pairs = set()
+    for left in condition_headers:
+        for right in condition_headers:
+            if left == right:
+                continue
+            pair = tuple(sorted((left, right)))
+            if pair in checked_pairs:
+                continue
+            checked_pairs.add(pair)
+            ratio = difflib.SequenceMatcher(a=normalized_headers[left], b=normalized_headers[right]).ratio()
+            if ratio >= SIMILAR_LABEL_THRESHOLD and normalized_headers[left] != normalized_headers[right]:
+                add_warning(warnings, "warning", "similar_condition_names", f"Condition names may be inconsistent: {left!r} vs {right!r}.", source_file=source_file)
+
+
+def build_long_rows(loaded, source_file, warnings):
+    headers = loaded["headers"]
+    date_column = detect_date_column(headers)
+    dmso_column = detect_dmso_column(headers, date_column)
+    add_warning(warnings, "info", "detected_date_column", f"Detected date column: {date_column}.", source_file=source_file, column_name=date_column)
+    add_warning(warnings, "info", "detected_dmso_column", f"Detected DMSO anchor column: {dmso_column}.", source_file=source_file, column_name=dmso_column)
+    condition_headers = [header for header in headers if header != date_column]
+    warn_on_similar_columns(condition_headers, warnings, source_file)
+    unique_condition_keys = uniquify_labels(condition_headers)
+    nonempty_counts = {header: 0 for header in condition_headers}
+    long_rows = []
+    for raw_row in loaded["rows"]:
+        row_number = int(raw_row["__row_number__"])
+        parsed_date, raw_date = parse_yy_mm_dd(raw_row.get(date_column))
+        if parsed_date is None:
+            add_warning(warnings, "warning", "invalid_date", "Row discarded because the date could not be parsed as YYMMDD.", source_file=source_file, row_number=row_number, column_name=date_column, value=raw_row.get(date_column, ""), date_raw=raw_row.get(date_column, ""))
+            continue
+        for condition_original in condition_headers:
+            raw_value = raw_row.get(condition_original, "")
+            numeric_value, cleaned_raw_value = parse_measurement(raw_value)
+            if cleaned_raw_value != "":
+                nonempty_counts[condition_original] += 1
+            if cleaned_raw_value == "":
+                continue
+            if numeric_value is None:
+                add_warning(warnings, "warning", "non_numeric_measurement", "Non-empty measurement discarded because it could not be parsed as numeric.", source_file=source_file, row_number=row_number, column_name=condition_original, value=cleaned_raw_value, date_raw=raw_date)
+                continue
+            long_rows.append({
+                "source_file": source_file,
+                "source_row_number": row_number,
+                "date_raw": raw_date,
+                "acquisition_date": parsed_date,
+                "condition_original": condition_original,
+                "condition_clean": normalize_label(condition_original),
+                "condition_key": unique_condition_keys[condition_original],
+                "raw_value": cleaned_raw_value,
+                "intensity": float(numeric_value),
+                "is_dmso_condition": condition_original == dmso_column,
+            })
+    for header, count in nonempty_counts.items():
+        if count == 0:
+            add_warning(warnings, "warning", "empty_condition_column", f"Condition column {header!r} produced no embryo records.", source_file=source_file, column_name=header)
+    if not long_rows:
+        raise ValueError("No valid embryo measurements were parsed from the file.")
+    return long_rows, dmso_column
+
+
+def summarize_values(values):
+    return {
+        "n_embryos": len(values),
+        "mean": safe_mean(values),
+        "median": safe_median(values),
+        "sd": safe_std(values),
+        "mad": safe_mad(values),
+        "iqr": safe_iqr(values),
+    }
+
+
+def compute_outlier_flags(long_rows):
+    groups = defaultdict(list)
+    for row in long_rows:
+        groups[(row["acquisition_date"], row["condition_key"])].append(row["intensity"])
+    bounds_by_group = {key: compute_iqr_bounds(values) for key, values in groups.items()}
+    for row in long_rows:
+        bounds = bounds_by_group[(row["acquisition_date"], row["condition_key"])]
+        if bounds is None:
+            row["is_iqr_outlier_within_date_condition"] = False
+            row["outlier_lower_bound"] = None
+            row["outlier_upper_bound"] = None
+            continue
+        lower, upper = bounds
+        row["outlier_lower_bound"] = lower
+        row["outlier_upper_bound"] = upper
+        row["is_iqr_outlier_within_date_condition"] = bool(row["intensity"] < lower or row["intensity"] > upper)
+
+
+def normalize_by_dmso(long_rows, dmso_column, warnings, source_file, branch_label):
+    dmso_by_date = defaultdict(list)
+    for row in long_rows:
+        if row["condition_original"] == dmso_column:
+            dmso_by_date[row["acquisition_date"]].append(row["intensity"])
+    dmso_rows = []
+    dmso_summary = {}
+    all_dates = sorted({row["acquisition_date"] for row in long_rows})
+    for acquisition_date in all_dates:
+        dmso_values = dmso_by_date.get(acquisition_date, [])
+        stats = summarize_values(dmso_values)
+        anchor = stats["median"]
+        status = "ok"
+        if not dmso_values:
+            status = "missing_dmso"
+            add_warning(warnings, "warning", "missing_dmso_anchor", f"Date has no valid DMSO measurements in branch '{branch_label}'.", source_file=source_file, date_raw=acquisition_date)
+        elif len(dmso_values) < MIN_DMSO_N_RECOMMENDED:
+            status = "low_dmso_n"
+            add_warning(warnings, "warning", "low_dmso_n", f"Date has only {len(dmso_values)} DMSO embryos in branch '{branch_label}'.", source_file=source_file, date_raw=acquisition_date)
+        if anchor is None or anchor <= 0:
+            status = "invalid_dmso_anchor"
+            add_warning(warnings, "warning", "invalid_dmso_anchor", f"Date could not be normalized in branch '{branch_label}'.", source_file=source_file, date_raw=acquisition_date)
+        dmso_row = {
+            "source_file": source_file,
+            "acquisition_date": acquisition_date,
+            "dmso_condition_original": dmso_column,
+            "dmso_n": len(dmso_values),
+            "dmso_mean": stats["mean"],
+            "dmso_median": anchor,
+            "dmso_sd": stats["sd"],
+            "dmso_mad": stats["mad"],
+            "dmso_iqr": stats["iqr"],
+            "anchor_status": status,
+            "analysis_variant": branch_label,
+        }
+        dmso_rows.append(dmso_row)
+        dmso_summary[acquisition_date] = dmso_row
+    for row in long_rows:
+        anchor_info = dmso_summary[row["acquisition_date"]]
+        anchor = anchor_info["dmso_median"]
+        row["dmso_n"] = anchor_info["dmso_n"]
+        row["dmso_median"] = anchor
+        row["anchor_status"] = anchor_info["anchor_status"]
+        row["analysis_variant"] = branch_label
+        if anchor is None or anchor <= 0:
+            row["ratio_vs_dmso"] = None
+            row["log2fc_vs_dmso"] = None
+            row["normalization_status"] = "not_normalized_missing_anchor"
+        else:
+            ratio = row["intensity"] / anchor
+            row["ratio_vs_dmso"] = ratio
+            row["log2fc_vs_dmso"] = log2_or_none(ratio)
+            row["normalization_status"] = "normalized"
+    return long_rows, dmso_rows
+
+
+def build_summary_rows(long_rows):
+    grouped = defaultdict(list)
+    for row in long_rows:
+        grouped[(row["acquisition_date"], row["condition_key"])].append(row)
+    summary_rows = []
+    for (acquisition_date, condition_key), rows in sorted(grouped.items()):
+        intensities = [row["intensity"] for row in rows]
+        ratios = [row["ratio_vs_dmso"] for row in rows if row["ratio_vs_dmso"] is not None]
+        log2fcs = [row["log2fc_vs_dmso"] for row in rows if row["log2fc_vs_dmso"] is not None]
+        raw_stats = summarize_values(intensities)
+        ratio_stats = summarize_values(ratios)
+        log2_stats = summarize_values(log2fcs)
+        summary_rows.append({
+            "source_file": rows[0]["source_file"],
+            "acquisition_date": acquisition_date,
+            "condition_original": rows[0]["condition_original"],
+            "condition_clean": rows[0]["condition_clean"],
+            "condition_key": condition_key,
+            "analysis_variant": rows[0]["analysis_variant"],
+            "n_embryos": raw_stats["n_embryos"],
+            "n_normalized": len(ratios),
+            "n_outlier_flagged": sum(1 for row in rows if row["is_iqr_outlier_within_date_condition"]),
+            "raw_mean": raw_stats["mean"],
+            "raw_median": raw_stats["median"],
+            "raw_sd": raw_stats["sd"],
+            "raw_mad": raw_stats["mad"],
+            "raw_iqr": raw_stats["iqr"],
+            "normalized_ratio_mean": ratio_stats["mean"],
+            "normalized_ratio_median": ratio_stats["median"],
+            "normalized_ratio_sd": ratio_stats["sd"],
+            "normalized_log2fc_mean": log2_stats["mean"],
+            "normalized_log2fc_median": log2_stats["median"],
+            "normalized_log2fc_sd": log2_stats["sd"],
+            "anchor_status": rows[0]["anchor_status"],
+        })
+    return summary_rows
+
+
+def build_variation_rows(summary_rows):
+    by_condition = defaultdict(list)
+    for row in summary_rows:
+        by_condition[row["condition_key"]].append(row)
+    variation_rows = []
+    for condition_key, rows in sorted(by_condition.items()):
+        raw_daily_medians = [row["raw_median"] for row in rows if row["raw_median"] is not None]
+        normalized_daily_medians = [row["normalized_ratio_median"] for row in rows if row["normalized_ratio_median"] is not None]
+        variation_rows.append({
+            "source_file": rows[0]["source_file"],
+            "condition_original": rows[0]["condition_original"],
+            "condition_clean": rows[0]["condition_clean"],
+            "condition_key": condition_key,
+            "analysis_variant": rows[0]["analysis_variant"],
+            "raw_daily_median_cv": safe_cv(raw_daily_medians),
+            "normalized_daily_median_cv": safe_cv(normalized_daily_medians),
+        })
+    return variation_rows
+
+
+def build_analysis_branch(base_rows, dmso_column, warnings, source_file, branch_label, exclude_outliers):
+    branch_rows = [copy.deepcopy(row) for row in base_rows]
+    if exclude_outliers:
+        branch_rows = [row for row in branch_rows if not row["is_iqr_outlier_within_date_condition"]]
+    if not branch_rows:
+        add_warning(warnings, "warning", "empty_branch_after_outlier_removal", f"Branch '{branch_label}' has no rows after outlier exclusion.", source_file=source_file)
+        return [], [], [], []
+    branch_rows, dmso_rows = normalize_by_dmso(branch_rows, dmso_column, warnings, source_file, branch_label)
+    branch_rows.sort(key=lambda row: (row["acquisition_date"], row["source_row_number"], row["condition_original"]))
+    summary_rows = build_summary_rows(branch_rows)
+    variation_rows = build_variation_rows(summary_rows)
+    return branch_rows, summary_rows, dmso_rows, variation_rows
+
+
+def rows_to_csv(rows):
+    if not rows:
+        return ""
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=list(rows[0].keys()))
+    writer.writeheader()
+    writer.writerows(rows)
+    return output.getvalue()
+
+
+def analyze_one_file(source_file, text):
+    warnings = []
+    add_warning(warnings, "info", "file_loaded", "Loaded file in browser.", source_file=source_file)
+    loaded = read_csv_text(text, source_file, warnings)
+    long_rows, dmso_column = build_long_rows(loaded, source_file, warnings)
+    compute_outlier_flags(long_rows)
+    n_outliers = sum(1 for row in long_rows if row["is_iqr_outlier_within_date_condition"])
+    if n_outliers:
+        add_warning(warnings, "warning", "outliers_flagged_not_removed", f"Flagged {n_outliers} potential outliers by the 1.5*IQR rule within date-condition groups.", source_file=source_file)
+    removed_outlier_rows = [copy.deepcopy(row) for row in long_rows if row["is_iqr_outlier_within_date_condition"]]
+    for row in removed_outlier_rows:
+        row["analysis_variant"] = "removed_outliers"
+    retained_long_rows, retained_summary_rows, retained_dmso_rows, retained_variation_rows = build_analysis_branch(long_rows, dmso_column, warnings, source_file, "with_outliers", False)
+    cleaned_long_rows, cleaned_summary_rows, cleaned_dmso_rows, cleaned_variation_rows = build_analysis_branch(long_rows, dmso_column, warnings, source_file, "without_outliers", True)
+    base = source_file.rsplit(".", 1)[0]
+    output_files = {
+        f"{base}_normalized_long_with_outliers.csv": rows_to_csv(retained_long_rows),
+        f"{base}_normalized_long_without_outliers.csv": rows_to_csv(cleaned_long_rows),
+        f"{base}_removed_outliers.csv": rows_to_csv(removed_outlier_rows),
+        f"{base}_summary_by_date_condition_with_outliers.csv": rows_to_csv(retained_summary_rows),
+        f"{base}_summary_by_date_condition_without_outliers.csv": rows_to_csv(cleaned_summary_rows),
+        f"{base}_dmso_anchor_by_date_with_outliers.csv": rows_to_csv(retained_dmso_rows),
+        f"{base}_dmso_anchor_by_date_without_outliers.csv": rows_to_csv(cleaned_dmso_rows),
+        f"{base}_variation_by_condition_with_outliers.csv": rows_to_csv(retained_variation_rows),
+        f"{base}_variation_by_condition_without_outliers.csv": rows_to_csv(cleaned_variation_rows),
+        f"{base}_warnings.csv": rows_to_csv(warnings),
+    }
+    return {
+        "source_file": source_file,
+        "summary": {
+            "with_outliers_rows": len(retained_long_rows),
+            "without_outliers_rows": len(cleaned_long_rows),
+            "removed_outliers_rows": len(removed_outlier_rows),
+            "warning_count": len(warnings),
+            "n_dates": len(sorted({row["acquisition_date"] for row in retained_long_rows})),
+            "n_conditions": len(sorted({row["condition_original"] for row in retained_long_rows})),
+        },
+        "warnings": warnings,
+        "outputs": output_files,
+        "branches": {
+            "with_outliers": {"long_rows": retained_long_rows, "summary_rows": retained_summary_rows, "dmso_rows": retained_dmso_rows, "variation_rows": retained_variation_rows},
+            "without_outliers": {"long_rows": cleaned_long_rows, "summary_rows": cleaned_summary_rows, "dmso_rows": cleaned_dmso_rows, "variation_rows": cleaned_variation_rows},
+        },
+    }
+
+
+def analyze_file_payload(payload_json, progress_cb=None):
+    import json
+    payload = json.loads(payload_json)
+    files = payload.get("files", [])
+    results = []
+    ignored_files = payload.get("ignored_files", [])
+    total = max(1, len(files))
+    for index, item in enumerate(files):
+        if progress_cb is not None:
+            progress_cb(f"Analyzing {item['name']} ({index + 1}/{total})…", int(10 + 80 * index / total))
+        results.append(analyze_one_file(item["name"], item["text"]))
+    if progress_cb is not None:
+        progress_cb("Finalizing browser outputs…", 96)
+    return {
+        "results": results,
+        "ignored_files": ignored_files,
+        "run_summary": [{"source_file": item["source_file"], **item["summary"]} for item in results],
+    }
