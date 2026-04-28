@@ -277,28 +277,50 @@ function renderFileTabs(results) {
   safeResults.forEach((item, index) => renderFilePanelPlots(item, index));
 }
 
+function makeDownloadLinks(filenames, fileIndex) {
+  return filenames.map((filename) => `
+    <a href="#" class="download-link" data-file-index="${fileIndex}" data-output-name="${escapeHtml(filename)}">
+      <span>${escapeHtml(filename)}</span><span class="download-meta">CSV</span>
+    </a>
+  `).join("");
+}
+
 function renderFilePanel(item, fileIndex) {
   const warnings = Array.isArray(item.warnings) ? item.warnings : [];
   const outputs = item.outputs || {};
   const summary = item.summary || {};
   const warningLines = warnings.map((warning) => formatWarningLine(warning)).join("");
-  const outputLinks = Object.entries(outputs).map(([filename]) => `
-    <a href="#" class="download-link" data-file-index="${fileIndex}" data-output-name="${escapeHtml(filename)}">
-      <span>${escapeHtml(filename)}</span><span class="download-meta">CSV</span>
-    </a>
-  `).join("");
+  const allFilenames = Object.keys(outputs);
+  const prismFiles = allFilenames.filter((f) => f.includes("_PRISM_"));
+  const detailFiles = allFilenames.filter((f) => !f.includes("_PRISM_") && !f.includes("_advertencias"));
+  const warningFiles = allFilenames.filter((f) => f.includes("_advertencias"));
+  const downloadSection = `
+    <div class="download-group">
+      <div class="download-group-label">Tablas para Prism GraphPad</div>
+      <div class="download-group-note">
+        <strong>_PRISM_por_fecha</strong>: una fila = un día experimental (N = fechas). Recomendada para estadística.<br>
+        <strong>_PRISM_por_embrion</strong>: una fila = un embrión (N = embriones). Puede causar pseudorreplicación.
+      </div>
+      <div class="download-files">${makeDownloadLinks(prismFiles, fileIndex)}</div>
+    </div>
+    <div class="download-group">
+      <div class="download-group-label">Tablas detalladas</div>
+      <div class="download-files">${makeDownloadLinks(detailFiles, fileIndex)}</div>
+    </div>
+    ${warningFiles.length ? `<div class="download-group"><div class="download-group-label">Advertencias y notas</div><div class="download-files">${makeDownloadLinks(warningFiles, fileIndex)}</div></div>` : ""}
+  `;
   return `
     <div class="file-panel">
       <div class="file-summary-grid">
-        <div class="file-summary-block"><div class="file-summary-title">Input file</div><div class="file-summary-main">${escapeHtml(item.source_file)}</div></div>
-        <div class="file-summary-block"><div class="file-summary-title">Selected control</div><div class="file-summary-main">${escapeHtml(summary.control_column || "NA")}</div></div>
-        <div class="file-summary-block"><div class="file-summary-title">Rows with outliers</div><div class="file-summary-main">${summary.with_outliers_rows ?? "NA"}</div></div>
-        <div class="file-summary-block"><div class="file-summary-title">Rows without outliers</div><div class="file-summary-main">${summary.without_outliers_rows ?? "NA"}</div></div>
-        <div class="file-summary-block"><div class="file-summary-title">Removed outliers</div><div class="file-summary-main">${summary.removed_outliers_rows ?? "NA"}</div></div>
-        <div class="file-summary-block"><div class="file-summary-title">Warnings</div><div class="file-summary-main">${summary.warning_count ?? warnings.length}</div></div>
+        <div class="file-summary-block"><div class="file-summary-title">Archivo de entrada</div><div class="file-summary-main">${escapeHtml(item.source_file)}</div></div>
+        <div class="file-summary-block"><div class="file-summary-title">Control seleccionado</div><div class="file-summary-main">${escapeHtml(summary.control_column || "NA")}</div></div>
+        <div class="file-summary-block"><div class="file-summary-title">Filas con outliers</div><div class="file-summary-main">${summary.with_outliers_rows ?? "NA"}</div></div>
+        <div class="file-summary-block"><div class="file-summary-title">Filas sin outliers</div><div class="file-summary-main">${summary.without_outliers_rows ?? "NA"}</div></div>
+        <div class="file-summary-block"><div class="file-summary-title">Outliers eliminados</div><div class="file-summary-main">${summary.removed_outliers_rows ?? "NA"}</div></div>
+        <div class="file-summary-block"><div class="file-summary-title">Advertencias</div><div class="file-summary-main">${summary.warning_count ?? warnings.length}</div></div>
       </div>
-      <div class="download-box"><div class="file-summary-title">Download per-file outputs</div><div class="download-files">${outputLinks}</div></div>
-      <div class="warnings-box"><div class="file-summary-title">Warnings and processing notes</div><div class="warnings-list">${warningLines || '<div class="warning-line">No warnings.</div>'}</div></div>
+      <div class="download-box"><div class="file-summary-title">Descargar resultados</div>${downloadSection}</div>
+      <div class="warnings-box"><div class="file-summary-title">Advertencias y notas de procesamiento</div><div class="warnings-list">${warningLines || '<div class="warning-line">Sin advertencias.</div>'}</div></div>
       <div class="md-card" style="padding:18px;">
         <ul class="nav nav-tabs branch-tabs" role="tablist">
           <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#branch-with-${fileIndex}" type="button">with_outliers</button></li>

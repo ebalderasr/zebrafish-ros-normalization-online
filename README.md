@@ -150,6 +150,28 @@ This is important because removing outliers can also change the control median o
 
 ---
 
+### Statistical unit and pseudo-replication
+
+The normalization produces a log₂FC value for every individual embryo. The app exports two Prism table formats and **the researcher decides which one fits their experimental design**.
+
+**Per-date table (recommended for standard statistical inference)**
+
+Each acquisition date represents one independent experimental run. Embryos measured on the same day under the same condition are biological sub-replicates within that run, not independent experiments. In this design, the correct unit for statistical testing is the date, and N equals the number of dates with valid data:
+
+| Date | DMSO | Treatment A | Treatment B |
+|---|---|---|---|
+| 2026-03-17 | 0.00 | 1.14 | −0.43 |
+| 2026-03-18 | 0.00 | 0.98 | −0.61 |
+| 2026-03-19 | 0.00 | 1.02 | −0.55 |
+
+Each cell is the **median log₂FC** of all embryos in that date-condition group.
+
+**Per-embryo table (use with care)**
+
+Each row is one individual embryo's log₂FC, with all dates pooled. Columns are not paired. This format gives N = number of embryos, which can be 4–10× larger than the number of independent experimental days. Using it directly in t-tests or ANOVAs without accounting for the nested structure of the data inflates statistical power and increases the risk of false positives. It may be appropriate under specific designs (e.g., if the researcher treats embryos as the unit of inference within a single date, or applies a mixed model), but this should be a deliberate methodological choice.
+
+---
+
 ### Warnings and traceability
 
 The engine does not fail silently. It records warnings and notes for issues such as:
@@ -175,9 +197,11 @@ All warnings are shown in the interface and are also exported as CSV.
 | **Mandatory control selection** | One control column must be chosen for each file before analysis |
 | **DMSO by default** | If a `DMSO` column is detected, it is preselected automatically |
 | **Date-aware normalization** | Every date is normalized against the control measured on that same date |
-| **Dual output branches** | `with_outliers` and `without_outliers`, both fully exported |
+| **Prism table by date** | Wide table with one row per experimental day — recommended unit for statistical inference |
+| **Prism table by embryo** | Wide table with one row per embryo — use with awareness of pseudo-replication risk |
+| **Dual output branches** | `sin_outliers` and `con_outliers`, both fully exported |
 | **Interactive plots** | Plotly-based browser plots for raw, normalized and control-anchor views |
-| **Warnings and logs** | Parsing, normalization and data-quality issues remain explicit |
+| **Explicit warnings** | Parsing, normalization, raw-data assumption, and statistical notes remain visible |
 | **ZIP export** | All per-file outputs can be downloaded in one click |
 | **No data upload** | Everything runs locally in the browser |
 
@@ -227,15 +251,31 @@ that means:
 
 ## Outputs
 
-For each uploaded CSV, the app generates:
+For each uploaded CSV, the app generates 14 files organized in two groups.
 
-- normalized long table with outliers;
-- normalized long table without outliers;
-- removed outliers table;
-- summary by date and condition for both branches;
-- control-anchor table by date for both branches;
-- variation summary by condition for both branches;
-- warnings table.
+**Prism GraphPad tables** (primary deliverables):
+
+| File | Contents |
+|---|---|
+| `*_PRISM_por_fecha_sin_outliers.csv` | Wide table: one row per date, one column per condition, value = median log₂FC. **Recommended for statistical inference.** |
+| `*_PRISM_por_fecha_con_outliers.csv` | Same, retaining flagged outliers. |
+| `*_PRISM_por_embrion_sin_outliers.csv` | Wide table: one column per condition, one row per embryo (all dates pooled), value = log₂FC. |
+| `*_PRISM_por_embrion_con_outliers.csv` | Same, retaining flagged outliers. |
+
+**Detailed tables** (for traceability and deeper inspection):
+
+| File | Contents |
+|---|---|
+| `*_datos_normalizados_sin_outliers.csv` | Long-format table of all embryo measurements after normalization (outliers removed). |
+| `*_datos_normalizados_con_outliers.csv` | Same, retaining flagged outliers. |
+| `*_outliers_eliminados.csv` | Records of embryos flagged and removed as outliers. |
+| `*_resumen_por_fecha_condicion_sin_outliers.csv` | Summary statistics (n, mean, median, SD) per date × condition. |
+| `*_resumen_por_fecha_condicion_con_outliers.csv` | Same, retaining flagged outliers. |
+| `*_ancla_control_por_fecha_sin_outliers.csv` | Control anchor statistics used for normalization, per date. |
+| `*_ancla_control_por_fecha_con_outliers.csv` | Same, retaining flagged outliers. |
+| `*_variacion_por_condicion_sin_outliers.csv` | Across-date CV of daily medians, before and after normalization. |
+| `*_variacion_por_condicion_con_outliers.csv` | Same, retaining flagged outliers. |
+| `*_advertencias.csv` | All warnings and processing notes generated during analysis. |
 
 At the interface level, each file also includes:
 

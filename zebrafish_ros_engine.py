@@ -473,32 +473,149 @@ def rows_to_csv(rows):
     return output.getvalue()
 
 
+def prism_rows_to_csv(rows, headers):
+    if not rows or not headers:
+        return ""
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=headers, extrasaction="ignore", restval="")
+    writer.writeheader()
+    writer.writerows(rows)
+    return output.getvalue()
+
+
+def _ordered_condition_keys(long_rows):
+    """Returns condition keys in order: control first, then others in order of first appearance."""
+    seen_keys = []
+    seen_set = set()
+    control_key = None
+    key_to_original = {}
+    for row in long_rows:
+        ck = row["condition_key"]
+        key_to_original[ck] = row["condition_original"]
+        if ck not in seen_set:
+            seen_set.add(ck)
+            seen_keys.append(ck)
+        if row["is_control_condition"]:
+            control_key = ck
+    ordered = []
+    if control_key and control_key in seen_keys:
+        ordered.append(control_key)
+    for ck in seen_keys:
+        if ck not in ordered:
+            ordered.append(ck)
+    return ordered, key_to_original
+
+
+def build_prism_by_date(long_rows):
+    """Wide Prism table: one row per acquisition date, one column per condition.
+    Each cell = median log2FC of all embryos in that date-condition group.
+    This is the recommended table for statistical inference (N = number of dates)."""
+    if not long_rows:
+        return [], []
+    ordered_keys, key_to_original = _ordered_condition_keys(long_rows)
+    groups = defaultdict(lambda: defaultdict(list))
+    for row in long_rows:
+        if row.get("log2fc_vs_control") is not None:
+            groups[row["acquisition_date"]][row["condition_key"]].append(row["log2fc_vs_control"])
+    all_dates = sorted({row["acquisition_date"] for row in long_rows})
+    headers = ["acquisition_date"] + [key_to_original.get(ck, ck) for ck in ordered_keys]
+    result_rows = []
+    for date in all_dates:
+        row_dict = {"acquisition_date": date}
+        for ck in ordered_keys:
+            col = key_to_original.get(ck, ck)
+            values = groups[date].get(ck, [])
+            row_dict[col] = safe_median(values) if values else ""
+        result_rows.append(row_dict)
+    return result_rows, headers
+
+
+def build_prism_by_embryo(long_rows):
+    """Wide Prism table: one column per condition, one row per individual embryo (all dates pooled).
+    Each cell = log2FC of one embryo. Rows are NOT paired across conditions.
+    Shorter columns are padded with empty cells.
+    Use with caution: treating each embryo as independent may cause pseudo-replication."""
+    if not long_rows:
+        return [], []
+    ordered_keys, key_to_original = _ordered_condition_keys(long_rows)
+    by_condition = defaultdict(list)
+    for row in long_rows:
+        if row.get("log2fc_vs_control") is not None:
+            by_condition[row["condition_key"]].append(row["log2fc_vs_control"])
+    max_n = max((len(v) for v in by_condition.values()), default=0)
+    if max_n == 0:
+        return [], []
+    headers = [key_to_original.get(ck, ck) for ck in ordered_keys]
+    result_rows = []
+    for i in range(max_n):
+        row_dict = {}
+        for ck in ordered_keys:
+            col = key_to_original.get(ck, ck)
+            values = by_condition.get(ck, [])
+            row_dict[col] = values[i] if i < len(values) else ""
+        result_rows.append(row_dict)
+    return result_rows, headers
+
+
 def analyze_one_file(source_file, text, control_column=None):
     warnings = []
-    add_warning(warnings, "info", "file_loaded", "Loaded file in browser.", source_file=source_file)
+    add_warning(warnings, "info", "file_loaded", "Archivo cargado en el navegador.", source_file=source_file)
+    add_warning(warnings, "info", "raw_data_assumption",
+        "SUPUESTO DE DATOS CRUDOS: Esta herramienta asume que todos los valores de entrada son "
+        "intensidades de fluorescencia crudas sin procesar. Si tus datos ya fueron normalizados, "
+        "escalados o transformados por el software de adquisición (p.ej. porcentaje de control, "
+        "valores relativos), los resultados no serán válidos. Verifica el origen de tus datos "
+        "antes de usar los resultados.",
+        source_file=source_file)
+    add_warning(warnings, "info", "multi_file_normalization_note",
+        "NOTA MULTI-ARCHIVO: Cada archivo CSV es normalizado de forma completamente independiente, "
+        "usando únicamente los embriones de control medidos en ese mismo archivo y en esa misma fecha. "
+        "Si cargas varios archivos que comparten fechas de adquisición pero tienen embriones de control "
+        "distintos (grupos diferentes), las condiciones entre archivos no son directamente comparables "
+        "sin verificar que los anclas de normalización sean equivalentes. Interpreta las comparaciones "
+        "entre archivos con precaución.",
+        source_file=source_file)
     loaded = read_csv_text(text, source_file, warnings)
     long_rows, selected_control_column = build_long_rows(loaded, source_file, warnings, requested_control_column=control_column)
     compute_outlier_flags(long_rows)
     n_outliers = sum(1 for row in long_rows if row["is_iqr_outlier_within_date_condition"])
     if n_outliers:
-        add_warning(warnings, "warning", "outliers_flagged_not_removed", f"Flagged {n_outliers} potential outliers by the 1.5*IQR rule within date-condition groups.", source_file=source_file)
+        add_warning(warnings, "warning", "outliers_flagged_not_removed", f"Se detectaron {n_outliers} posibles outliers con la regla 1.5×IQR dentro de cada grupo fecha-condición.", source_file=source_file)
+    add_warning(warnings, "info", "statistical_unit_note",
+        "NOTA ESTADÍSTICA — PSEUDORREPLICACIÓN: La unidad experimental independiente es la FECHA de "
+        "adquisición (cada día = una réplica experimental), no el embrión individual. "
+        "La tabla 'PRISM_por_fecha' (una fila por día experimental) es la apropiada para inferencia "
+        "estadística estándar (t-test, ANOVA, etc.) donde N = número de fechas. "
+        "La tabla 'PRISM_por_embrion' trata cada embrión como observación independiente; "
+        "usarla directamente en pruebas estadísticas puede producir pseudorreplicación y "
+        "resultados con poder estadístico artificialmente inflado. El investigador decide qué "
+        "tabla es apropiada para su diseño experimental.",
+        source_file=source_file)
     removed_outlier_rows = [copy.deepcopy(row) for row in long_rows if row["is_iqr_outlier_within_date_condition"]]
     for row in removed_outlier_rows:
         row["analysis_variant"] = "removed_outliers"
     retained_long_rows, retained_summary_rows, retained_control_rows, retained_variation_rows = build_analysis_branch(long_rows, selected_control_column, warnings, source_file, "with_outliers", False)
     cleaned_long_rows, cleaned_summary_rows, cleaned_control_rows, cleaned_variation_rows = build_analysis_branch(long_rows, selected_control_column, warnings, source_file, "without_outliers", True)
+    prism_date_with, prism_date_with_h = build_prism_by_date(retained_long_rows)
+    prism_date_without, prism_date_without_h = build_prism_by_date(cleaned_long_rows)
+    prism_embryo_with, prism_embryo_with_h = build_prism_by_embryo(retained_long_rows)
+    prism_embryo_without, prism_embryo_without_h = build_prism_by_embryo(cleaned_long_rows)
     base = source_file.rsplit(".", 1)[0]
     output_files = {
-        f"{base}_normalized_long_with_outliers.csv": rows_to_csv(retained_long_rows),
-        f"{base}_normalized_long_without_outliers.csv": rows_to_csv(cleaned_long_rows),
-        f"{base}_removed_outliers.csv": rows_to_csv(removed_outlier_rows),
-        f"{base}_summary_by_date_condition_with_outliers.csv": rows_to_csv(retained_summary_rows),
-        f"{base}_summary_by_date_condition_without_outliers.csv": rows_to_csv(cleaned_summary_rows),
-        f"{base}_control_anchor_by_date_with_outliers.csv": rows_to_csv(retained_control_rows),
-        f"{base}_control_anchor_by_date_without_outliers.csv": rows_to_csv(cleaned_control_rows),
-        f"{base}_variation_by_condition_with_outliers.csv": rows_to_csv(retained_variation_rows),
-        f"{base}_variation_by_condition_without_outliers.csv": rows_to_csv(cleaned_variation_rows),
-        f"{base}_warnings.csv": rows_to_csv(warnings),
+        f"{base}_PRISM_por_fecha_sin_outliers.csv": prism_rows_to_csv(prism_date_without, prism_date_without_h),
+        f"{base}_PRISM_por_fecha_con_outliers.csv": prism_rows_to_csv(prism_date_with, prism_date_with_h),
+        f"{base}_PRISM_por_embrion_sin_outliers.csv": prism_rows_to_csv(prism_embryo_without, prism_embryo_without_h),
+        f"{base}_PRISM_por_embrion_con_outliers.csv": prism_rows_to_csv(prism_embryo_with, prism_embryo_with_h),
+        f"{base}_datos_normalizados_sin_outliers.csv": rows_to_csv(cleaned_long_rows),
+        f"{base}_datos_normalizados_con_outliers.csv": rows_to_csv(retained_long_rows),
+        f"{base}_outliers_eliminados.csv": rows_to_csv(removed_outlier_rows),
+        f"{base}_resumen_por_fecha_condicion_sin_outliers.csv": rows_to_csv(cleaned_summary_rows),
+        f"{base}_resumen_por_fecha_condicion_con_outliers.csv": rows_to_csv(retained_summary_rows),
+        f"{base}_ancla_control_por_fecha_sin_outliers.csv": rows_to_csv(cleaned_control_rows),
+        f"{base}_ancla_control_por_fecha_con_outliers.csv": rows_to_csv(retained_control_rows),
+        f"{base}_variacion_por_condicion_sin_outliers.csv": rows_to_csv(cleaned_variation_rows),
+        f"{base}_variacion_por_condicion_con_outliers.csv": rows_to_csv(retained_variation_rows),
+        f"{base}_advertencias.csv": rows_to_csv(warnings),
     }
     return {
         "source_file": source_file,
