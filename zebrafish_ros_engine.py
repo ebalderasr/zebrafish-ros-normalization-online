@@ -449,6 +449,37 @@ def build_variation_rows(summary_rows):
     return variation_rows
 
 
+def build_prism_matrix_rows(summary_rows, value_key, control_column=None):
+    if not summary_rows:
+        return []
+    dates = sorted({row["acquisition_date"] for row in summary_rows})
+    condition_order = []
+    seen = set()
+    for row in summary_rows:
+        condition_key = row["condition_key"]
+        if condition_key in seen:
+            continue
+        seen.add(condition_key)
+        condition_order.append((condition_key, row["condition_original"]))
+    condition_order.sort(key=lambda item: item[0])
+    condition_labels = [label for _, label in condition_order]
+    ordered_labels = []
+    if control_column in condition_labels:
+        ordered_labels.append(control_column)
+    ordered_labels.extend(label for label in condition_labels if label != control_column)
+    value_lookup = {
+        (row["acquisition_date"], row["condition_original"]): row.get(value_key)
+        for row in summary_rows
+    }
+    matrix_rows = []
+    for acquisition_date in dates:
+        matrix_row = {"acquisition_date": acquisition_date}
+        for condition_label in ordered_labels:
+            matrix_row[condition_label] = value_lookup.get((acquisition_date, condition_label))
+        matrix_rows.append(matrix_row)
+    return matrix_rows
+
+
 def build_analysis_branch(base_rows, control_column, warnings, source_file, branch_label, exclude_outliers):
     branch_rows = [copy.deepcopy(row) for row in base_rows]
     if exclude_outliers:
@@ -498,6 +529,12 @@ def analyze_one_file(source_file, text, control_column=None):
         f"{base}_control_anchor_by_date_without_outliers.csv": rows_to_csv(cleaned_control_rows),
         f"{base}_variation_by_condition_with_outliers.csv": rows_to_csv(retained_variation_rows),
         f"{base}_variation_by_condition_without_outliers.csv": rows_to_csv(cleaned_variation_rows),
+        f"{base}_prism_log2fc_median_by_date_with_outliers.csv": rows_to_csv(build_prism_matrix_rows(retained_summary_rows, "normalized_log2fc_median", selected_control_column)),
+        f"{base}_prism_log2fc_median_by_date_without_outliers.csv": rows_to_csv(build_prism_matrix_rows(cleaned_summary_rows, "normalized_log2fc_median", selected_control_column)),
+        f"{base}_prism_log2fc_mean_by_date_with_outliers.csv": rows_to_csv(build_prism_matrix_rows(retained_summary_rows, "normalized_log2fc_mean", selected_control_column)),
+        f"{base}_prism_log2fc_mean_by_date_without_outliers.csv": rows_to_csv(build_prism_matrix_rows(cleaned_summary_rows, "normalized_log2fc_mean", selected_control_column)),
+        f"{base}_prism_n_by_date_with_outliers.csv": rows_to_csv(build_prism_matrix_rows(retained_summary_rows, "n_embryos", selected_control_column)),
+        f"{base}_prism_n_by_date_without_outliers.csv": rows_to_csv(build_prism_matrix_rows(cleaned_summary_rows, "n_embryos", selected_control_column)),
         f"{base}_warnings.csv": rows_to_csv(warnings),
     }
     return {
