@@ -1,375 +1,390 @@
-<div align="center">
+# zebrafish-ros-normalization-online
 
-# Zebrafish ROS Normalizer Online
+[![tests](https://github.com/ebalderasr/zebrafish-ros-normalization-online/actions/workflows/tests.yml/badge.svg)](https://github.com/ebalderasr/zebrafish-ros-normalization-online/actions/workflows/tests.yml)
 
-### From raw DCF fluorescence CSVs to normalized, date-aware ROS analysis — entirely in your browser
+Reproducible pipeline for normalizing and analysing **DCF fluorescence**
+measurements of reactive oxygen species in zebrafish embryos. It ships in two
+forms that compute the same thing:
 
-<br>
+- **[Browser app](https://ebalderasr.github.io/zebrafish-ros-normalization-online/)**,
+  which runs entirely client-side through Pyodide. No installation, no upload,
+  no backend. Data never leaves the machine.
+- **Offline package** (`zebrafish_ros`), a Python CLI and library for scripted,
+  version-controlled analysis.
 
-**[→ Open the live app](https://ebalderasr.github.io/zebrafish-ros-normalization-online/)**
+An automated test suite checks that the two produce identical per-embryo
+log₂FC, control anchors, outlier flags and per-session tables. See
+[Parity](#parity-between-the-two-implementations).
 
-<br>
+The problem it solves is specific. DCF reports a single channel, so its
+absolute intensity carries no internal correction for probe loading, embryo
+size or illumination. In the bundled example data the session median of the
+vehicle control spans 2.6-fold, while the drug effects are on the order of 15
+to 30 %. Without correction, the between-session drift is larger than the
+effect under study.
 
-[![Stack](https://img.shields.io/badge/Stack-Pyodide_·_NumPy_·_Plotly-4A90D9?style=for-the-badge)]()
-[![Focus](https://img.shields.io/badge/Focus-Zebrafish_Embryos_·_DCF_Analysis-34C759?style=for-the-badge)]()
-[![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](./LICENSE)
-[![Part of](https://img.shields.io/badge/Part_of-HostCell_Lab_Suite-5856D6?style=for-the-badge)](https://github.com/ebalderasr)
+```
+raw CSVs  ->  tidy  ->  outlier flagging  ->  within-session normalization
+          ->  nested statistics  ->  Prism tables  ->  figures
+```
 
-</div>
+> Manuscript-ready Methods text is in **[METHODS.md](METHODS.md)**, typeset to
+> **[docs/methods.pdf](docs/methods.pdf)**.
+> *Este README también está disponible [en español](README.es.md).*
 
----
+### Companion repository
 
-## What is Zebrafish ROS Normalizer Online?
-
-Zebrafish ROS Normalizer Online is a **browser-based analysis app** for DCF fluorescence experiments in zebrafish embryos. It takes one or more raw CSV files, interprets each non-empty cell as one independent embryo, normalizes intensities by acquisition date using an internal control from the same day, flags outliers, renders interactive plots, and packages the processed tables into a downloadable ZIP.
-
-It runs entirely in the browser through [Pyodide](https://pyodide.org), so **no Python installation, no local scripts, and no data upload are required**. Your experimental data stays on your machine.
-
----
-
-## Why it matters
-
-DCF fluorescence is highly sensitive to acquisition settings and handling conditions. Across different experiment days, changes in laser power, detector gain, embryo timing, and operator workflow can shift raw intensities enough to make direct cross-date comparisons misleading.
-
-Without a normalization strategy, a treatment can appear different simply because it was acquired under different microscope settings.
-
-This app solves that by anchoring each date to an internal control measured on the same day. What used to require repeated spreadsheet cleanup, manual per-day normalization, and multiple plotting rounds can now be done in one browser session.
-
----
-
-## How it works
-
-Four steps. No command line. No backend.
-
-<br>
-
-**Step 1 — Upload one or more CSV files**
-
-Drag and drop your files or click to browse. The app accepts multiple `.csv` files at once and ignores non-CSV inputs automatically. Each file is treated as a separate experiment and is analyzed independently.
-
-<br>
-
-**Step 2 — The app detects your columns**
-
-The engine inspects each CSV to identify:
-
-- the date column;
-- the condition columns;
-- and a default candidate control.
-
-If a `DMSO`-like column exists, it is preselected automatically.
-
-<br>
-
-**Step 3 — Choose one control per file**
-
-When you click **Analyze files**, the app opens a modal asking for the control column of **each uploaded CSV**. This step is mandatory. `DMSO` is selected by default when present, but the user can choose any other condition to serve as the internal reference.
-
-<br>
-
-**Step 4 — Analyze and explore**
-
-The app processes every file in the browser, generates normalized tables and warnings, and displays interactive plots for:
-
-- raw distribution by condition;
-- raw median intensity across dates;
-- control-anchor drift across dates;
-- normalized distributions;
-- and variation reduction after normalization.
-
-Each file also includes downloadable per-file outputs, and the full session can be exported as a ZIP.
+The ratiometric HyPer measurements of the same study are processed by
+[hyper-normalizer](https://github.com/ebalderasr/hyper-normalizer). Both
+repositories accept the same input layout, apply within-session normalization
+against the control, and run the same session-as-replicate statistics, so the
+two assays can be reported side by side. The differences specific to DCF are
+the median anchor and the outlier branch, both explained below.
 
 ---
 
-## Methods
+## The mathematics
 
-### Input model
+### 1. The input is a single-channel intensity
 
-Each CSV is expected to contain:
+HyPer is ratiometric and divides out probe concentration on its own. DCF does
+not. One intensity per embryo is all that is measured, so nothing in the raw
+number corrects for how much probe the embryo took up or how bright the lamp
+was that morning. Every comparison across sessions therefore depends on the
+anchor described in section 3.
 
-- one date column;
-- one column per experimental condition;
-- zero or more empty cells.
+The unit of measurement is one embryo. Rows are not paired: two values on the
+same CSV row are two different embryos imaged on the same date.
 
-Each non-empty numeric cell is treated as **one independent embryo**. If the same row contains values under multiple conditions, they are **not** interpreted as matched embryos; they are simply embryos acquired on the same date under different conditions.
+### 2. Tidy format and the shared control
+
+The raw CSVs are wide matrices: one row per embryo, one column per condition,
+empty cells where no measurement was taken. These are converted to long format,
+`(GROUP, DATE, TREATMENT, INTENSITY)`.
+
+File names may follow the `{GROUP} DCF {PANEL}.csv` convention, the same shape
+`hyper-normalizer` uses. Files sharing a group are analysed together and their
+common control is de-duplicated: when one experiment is split across drug
+panels, the vehicle control is measured once and copied into each panel's
+sheet, so counting it per file would multiply its n and bias the anchor. A file
+whose name does not match the convention becomes its own group, which is how
+the browser app has always behaved.
+
+The parser is deliberately permissive and accepts decimal commas, accented and
+inconsistently capitalised headers, numbers stored as text, and blank columns.
+
+### 3. Outlier flagging
+
+Within each `(group, date, treatment)`, embryos outside Tukey's bounds are
+flagged:
+
+$$L_{\text{low}} = Q_1 - 1.5\,\mathrm{IQR}, \qquad L_{\text{high}} = Q_3 + 1.5\,\mathrm{IQR}$$
+
+Groups of fewer than four embryos are left unflagged, since their quartiles are
+interpolated from too few points.
+
+Two branches are produced. `with_outliers/` keeps every embryo;
+`without_outliers/` removes the flagged ones **and recomputes the
+normalization**. Recomputing is the point: dropping an outlier from a control
+group changes that session's anchor, so filtering after normalizing would leave
+the remaining embryos divided by a denominator that no longer exists. A test
+checks that at least one session's anchor actually moves between branches.
+
+### 4. Within-session normalization
+
+The implicit model is multiplicative:
+
+$$I_i \;=\; \mu_t \cdot \beta_{g,d} \cdot \varepsilon_i$$
+
+$\mu_t$ is the condition effect, $\beta_{g,d}$ the batch factor of group $g$ on
+date $d$, and $\varepsilon_i$ the between-embryo noise. A summary of the
+control from the same group and date estimates $\beta_{g,d}$, so dividing by it
+cancels the term:
+
+$$\mathrm{ratio}_i \;=\; \frac{I_i}{\tilde{I}^{\,\mathrm{ctrl}}_{g,d}}, \qquad
+\tilde{I}^{\,\mathrm{ctrl}}_{g,d} \;=\; \operatorname{median}\left(I_j : j \in \mathrm{ctrl}(g,d)\right)$$
+
+The **median** is the default anchor, which is what the browser app uses and
+what suits single-channel intensities with occasional extreme values.
+`--anchor mean` switches to the arithmetic mean, matching `hyper-normalizer`.
+The choice moves the displayed fold changes slightly and leaves the statistical
+test untouched, which a test asserts to 1 part in 10¹².
+
+Two exact consequences follow, and both constrain the statistics:
+
+1. The normalized control is centred on 1 in every session, by construction.
+   That value is the reference line in the figures. It is also why the control
+   group cannot be treated as a freely varying sample in a test: it lost a
+   degree of freedom per session.
+2. Every embryo from a given session shares the same denominator, so embryos
+   within a session are not independent of one another.
+
+The property that justifies the method is covered by a test,
+`test_normalization_cancels_the_batch_factor`: multiplying every measurement of
+one session by 7, which is what a change in detector gain does, leaves the
+normalized values identical to 1 part in 10¹².
+
+That it works is also measured directly. `variation.csv` reports the across-date
+CV of the daily medians before and after normalization. On the example data it
+falls from 0.29–0.45 to 0.04–0.15, for every condition.
+
+### 5. Statistics: the session is the replicate
+
+A standard test over pooled embryos runs into both consequences above. The
+correction is to work on a logarithmic scale and use the acquisition session as
+the unit of replication:
+
+$$\delta_d \;=\; \overline{\log_2 I}\big|_{t,d} \;-\; \overline{\log_2 I}\big|_{\mathrm{ctrl},d}$$
+
+The difference is taken within a session and on the raw intensities, so
+$\log_2\beta_{g,d}$ cancels algebraically. The test therefore depends neither
+on the normalization nor on the anchor choice. The $\delta_d$ values, one per
+session, are tested against zero with a two-tailed one-sample *t* test, with
+$n$ equal to the number of sessions. The reported effect is $2^{\bar\delta}$,
+the geometric fold change, with its 95 % CI. *P* values are Holm-Bonferroni
+corrected within each group.
+
+Every session carries equal weight, regardless of how many embryos it holds.
+`--min-embryos 3` drops sessions below that count and is worth running as a
+sensitivity check.
+
+With `--mixed-model`, the full version is also fitted,
+
+$$\log_2 I_i \;=\; \alpha_t + b_d + \varepsilon_i, \qquad b_d \sim \mathcal{N}(0, \tau^2)$$
+
+which estimates session and condition effects jointly instead of normalizing
+first and testing afterwards.
+
+### 6. How much this matters
+
+On the synthetic example data, outliers removed:
+
+| Group | Cond. | sessions | fold | 95 % CI | *p* Holm | *p* naive |
+|-------|-------|---------:|-----:|---------|---------:|----------:|
+| WT | NAC | 5 | 0.719 | [0.672, 0.770] | 0.0011 | 2.6×10⁻¹⁷ |
+| WT | APO | 5 | 0.840 | [0.799, 0.883] | 0.0032 | 9.1×10⁻⁸ |
+| MUT | EUK | 5 | 0.920 | [0.812, 1.043] | 0.1376 | 6.1×10⁻² |
+
+The `p_naive_pooled` column treats every embryo as an independent replicate. It
+sits up to thirteen orders of magnitude below `p_holm`. The pipeline computes
+and prints it to quantify that inflation; the value to report is `p_holm`.
+
+### 7. Prism tables
+
+Two shapes, and the choice between them is methodological rather than
+cosmetic.
+
+`prism_by_date.csv` gives one row per acquisition session and one column per
+condition, each cell the median log₂FC of that session. N is the number of
+sessions, which is the design's number of independent replicates. **This is the
+table to paste into Prism.**
+
+`prism_by_embryo.csv` gives one row per embryo with all sessions pooled. N is
+then the number of embryos, typically 4 to 10 times larger. Feeding it to a
+*t* test or an ANOVA without modelling the nesting inflates significance. It is
+exported for inspection and for designs that account for the structure
+explicitly.
+
+### 8. Figures
+
+The main figure is a **SuperPlot** ([Lord et al., *J. Cell Biol.* 2020](https://doi.org/10.1083/jcb.202001064)).
+Individual embryos appear as faint grey background points, with the mean of
+each acquisition session drawn on top as a large colour-coded marker. This
+shows how many sessions support each box, and whether an effect holds across
+sessions or comes from a single date. A boxplot over pooled embryos shows
+neither.
+
+A companion figure plots the raw control anchor per session, which is the drift
+the normalization removes.
 
 ---
 
-### Normalization by date
+## Offline use
 
-For each file and each acquisition date \( d \), the user-selected control column is used as the internal anchor for that same day:
+```bash
+git clone https://github.com/ebalderasr/zebrafish-ros-normalization-online.git
+cd zebrafish-ros-normalization-online
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+pip install -e .
+```
 
-$$
-\widetilde{I}_{\mathrm{control},d} = \mathrm{median}\left(I_{\mathrm{control},d}\right)
-$$
+```bash
+# Bundled synthetic data
+python -m zebrafish_ros --input-dir data/example --output-dir results
 
-Then each embryo intensity is normalized as:
+# Your data, matching hyper-normalizer's conventions
+python -m zebrafish_ros \
+    --input-dir data/raw \
+    --output-dir results \
+    --anchor mean --min-embryos 3 --mixed-model
+```
 
-$$
-\mathrm{ratio}_{i,d} = \frac{I_{i,d}}{\widetilde{I}_{\mathrm{control},d}}
-$$
+Main options:
 
-and expressed on a log base 2 scale as:
-
-$$
-\log_2 \mathrm{FC}_{i,d} = \log_2 \left(\mathrm{ratio}_{i,d}\right)
-$$
-
-This design keeps normalization local to each file and each date. The engine does **not** use:
-
-- a global reference across all dates;
-- a pooled median across conditions;
-- or a shared anchor across uploaded files.
-
----
-
-### Outlier handling
-
-Outliers are detected within each `date × condition` group using the standard 1.5×IQR rule:
-
-$$
-\mathrm{IQR} = Q_3 - Q_1
-$$
-
-$$
-L_{\mathrm{inf}} = Q_1 - 1.5 \cdot \mathrm{IQR}
-$$
-
-$$
-L_{\mathrm{sup}} = Q_3 + 1.5 \cdot \mathrm{IQR}
-$$
-
-Any embryo with intensity outside those bounds is flagged as a potential outlier.
-
-The app returns two analysis branches for every file:
-
-- `with_outliers`: all embryos retained;
-- `without_outliers`: flagged outliers removed and normalization recalculated from the cleaned data.
-
-This is important because removing outliers can also change the control median of a given date, which means the normalized values must be recomputed rather than simply filtered.
-
----
-
-### Statistical unit and pseudo-replication
-
-The normalization produces a log₂FC value for every individual embryo. The app exports two Prism table formats and **the researcher decides which one fits their experimental design**.
-
-**Per-date table (recommended for standard statistical inference)**
-
-Each acquisition date represents one independent experimental run. Embryos measured on the same day under the same condition are biological sub-replicates within that run, not independent experiments. In this design, the correct unit for statistical testing is the date, and N equals the number of dates with valid data:
-
-| Date | DMSO | Treatment A | Treatment B |
-|---|---|---|---|
-| 2026-03-17 | 0.00 | 1.14 | −0.43 |
-| 2026-03-18 | 0.00 | 0.98 | −0.61 |
-| 2026-03-19 | 0.00 | 1.02 | −0.55 |
-
-Each cell is the **median log₂FC** of all embryos in that date-condition group.
-
-**Per-embryo table (use with care)**
-
-Each row is one individual embryo's log₂FC, with all dates pooled. Columns are not paired. This format gives N = number of embryos, which can be 4–10× larger than the number of independent experimental days. Using it directly in t-tests or ANOVAs without accounting for the nested structure of the data inflates statistical power and increases the risk of false positives. It may be appropriate under specific designs (e.g., if the researcher treats embryos as the unit of inference within a single date, or applies a mixed model), but this should be a deliberate methodological choice.
-
----
-
-### Warnings and traceability
-
-The engine does not fail silently. It records warnings and notes for issues such as:
-
-- missing or ambiguous date columns;
-- non-numeric cells;
-- empty condition columns;
-- inconsistent or nearly duplicated condition names;
-- dates without valid control measurements;
-- low control sample size for a given date;
-- and rows discarded during parsing.
-
-All warnings are shown in the interface and are also exported as CSV.
-
----
-
-## Features
-
-| | |
+| Option | Effect |
 |---|---|
-| **Zero installation** | Runs fully client-side via Pyodide |
-| **Multiple CSV support** | Each uploaded file is treated as an independent experiment |
-| **Mandatory control selection** | One control column must be chosen for each file before analysis |
-| **DMSO by default** | If a `DMSO` column is detected, it is preselected automatically |
-| **Date-aware normalization** | Every date is normalized against the control measured on that same date |
-| **Prism table by date** | Wide table with one row per experimental day — recommended unit for statistical inference |
-| **Prism table by embryo** | Wide table with one row per embryo — use with awareness of pseudo-replication risk |
-| **Dual output branches** | `sin_outliers` and `con_outliers`, both fully exported |
-| **Interactive plots** | Plotly-based browser plots for raw, normalized and control-anchor views |
-| **Explicit warnings** | Parsing, normalization, raw-data assumption, and statistical notes remain visible |
-| **ZIP export** | All per-file outputs can be downloaded in one click |
-| **No data upload** | Everything runs locally in the browser |
+| `--control NAME` | Column acting as the control (default `DMSO`). |
+| `--anchor median\|mean` | Statistic summarising each session's control. `median` matches the browser app, `mean` matches `hyper-normalizer`. The test is unaffected. |
+| `--outliers keep\|drop\|both` | Which branches to write (default `both`). |
+| `--min-embryos N` | Drop sessions measured in fewer than N embryos from the test. |
+| `--strict` | Fail if any `(group, date)` lacks a control, instead of dropping it. |
+| `--mixed-model` | Fit `log2(I) ~ treatment + (1 \| date)`. Requires `statsmodels`. |
+| `--no-plots` | Skip figure generation. |
 
----
+As a library:
+
+```python
+from pathlib import Path
+from zebrafish_ros import run
+
+result = run(Path("data/example"), Path("results"))
+for test in result.branches["drop"].tests:
+    print(test.group, test.treatment, round(test.geo_fold, 3), round(test.p_holm, 4))
+```
+
+## Browser use
+
+Open the [live app](https://ebalderasr.github.io/zebrafish-ros-normalization-online/),
+drop one or more CSVs, choose the control column for each file, and analyse.
+The app renders interactive plots and exports every table as a ZIP.
+
+To serve it locally:
+
+```bash
+python3 -m http.server 8000   # then open http://localhost:8000
+```
+
+The browser app fetches Pyodide, NumPy and Plotly from public CDNs, so it needs
+a network connection on first load. For work without network access, use the
+offline package.
 
 ## Input format
 
-### Required structure
+One file per group-and-panel combination, named `{GROUP} DCF {PANEL}.csv`, or
+any CSV name to have the file treated as its own group:
 
-Each CSV must contain:
+```csv
+FECHA,DMSO,VAS,DPI,APO
+240115,108.17,79.12,91.29,100.31
+240115,89.69,117.49,88.20,117.20
+240115,97.87,78.72,,75.07
+```
 
-| Element | Requirement |
-|---|---|
-| Date column | A date-like column detectable as `YYMMDD` rows, for example `260315` |
-| Condition columns | One or more treatment/control columns |
-| Values | Numeric fluorescence intensities, optionally using decimal commas |
-
-### Supported quirks
-
-The parser is intentionally permissive. It can handle:
-
-- leading/trailing spaces in headers;
-- accents and special characters in column names;
-- inconsistent capitalization;
-- empty cells;
-- completely empty columns;
-- numeric values stored as text;
-- decimal commas such as `123,4`;
-- and sparse condition coverage across dates.
-
-### Important interpretation rule
-
-Rows are **not** treated as paired embryos across conditions.
-
-If a row contains:
-
-| Fecha | DMSO | Treatment A |
-|---|---:|---:|
-| 260315 | 120 | 145 |
-
-that means:
-
-- one embryo under `DMSO` acquired on `2026-03-15`;
-- one different embryo under `Treatment A` acquired on `2026-03-15`.
-
----
+First column the acquisition date (YYMMDD), the rest conditions, one row per
+embryo, empty cells where no measurement was taken. This is the same layout
+`hyper-normalizer` accepts, so one experiment can be exported once and
+processed by either pipeline. When a group is split across panels, repeat the
+control column in each; the pipeline de-duplicates it.
 
 ## Outputs
 
-For each uploaded CSV, the app generates 14 files organized in two groups.
-
-**Prism GraphPad tables** (primary deliverables):
+At the top level:
 
 | File | Contents |
 |---|---|
-| `*_PRISM_por_fecha_sin_outliers.csv` | Wide table: one row per date, one column per condition, value = median log₂FC. **Recommended for statistical inference.** |
-| `*_PRISM_por_fecha_con_outliers.csv` | Same, retaining flagged outliers. |
-| `*_PRISM_por_embrion_sin_outliers.csv` | Wide table: one column per condition, one row per embryo (all dates pooled), value = log₂FC. |
-| `*_PRISM_por_embrion_con_outliers.csv` | Same, retaining flagged outliers. |
+| `tidy.csv` | One row per embryo, control already de-duplicated. |
+| `outliers_flagged.csv` | Every flagged embryo with the bounds that excluded it. |
 
-**Detailed tables** (for traceability and deeper inspection):
+Then once per branch, under `with_outliers/` and `without_outliers/`:
 
 | File | Contents |
 |---|---|
-| `*_datos_normalizados_sin_outliers.csv` | Long-format table of all embryo measurements after normalization (outliers removed). |
-| `*_datos_normalizados_con_outliers.csv` | Same, retaining flagged outliers. |
-| `*_outliers_eliminados.csv` | Records of embryos flagged and removed as outliers. |
-| `*_resumen_por_fecha_condicion_sin_outliers.csv` | Summary statistics (n, mean, median, SD) per date × condition. |
-| `*_resumen_por_fecha_condicion_con_outliers.csv` | Same, retaining flagged outliers. |
-| `*_ancla_control_por_fecha_sin_outliers.csv` | Control anchor statistics used for normalization, per date. |
-| `*_ancla_control_por_fecha_con_outliers.csv` | Same, retaining flagged outliers. |
-| `*_variacion_por_condicion_sin_outliers.csv` | Across-date CV of daily medians, before and after normalization. |
-| `*_variacion_por_condicion_con_outliers.csv` | Same, retaining flagged outliers. |
-| `*_advertencias.csv` | All warnings and processing notes generated during analysis. |
+| `normalized.csv` | Adds `ratio_norm`, `log2_norm` and the anchor used. |
+| `control_anchors.csv` | Control summary per session: n, mean, median, SD, status. |
+| `summary.csv` | Descriptives per group and condition, arithmetic and geometric. |
+| `date_folds.csv` | One row per `(group, date, treatment)`, the real replicates. |
+| `tests.csv` | Contrast vs control with session as replicate, CI, corrected *p*. |
+| `variation.csv` | Across-date CV of the daily medians, before and after normalization. |
+| `prism_by_date.csv` | Wide table, one row per session. Use this one for inference. |
+| `prism_by_embryo.csv` | Wide table, one row per embryo. Read section 7 first. |
+| `figure_groups.png` | SuperPlot per experimental group. |
+| `figure_control_drift.png` | Raw control anchor per session. |
 
-At the interface level, each file also includes:
+Floats are written with 12 significant digits, so re-reading an output file for
+a later analysis does not round a second time.
 
-- summary cards;
-- warnings and processing notes;
-- interactive plots for both branches;
-- per-file CSV downloads.
+## Parity between the two implementations
 
-The global ZIP export packages the outputs of all uploaded files without mixing experiments.
+`tests/test_engine_parity.py` runs `zebrafish_ros_engine.analyze_one_file`,
+which is the module Pyodide loads in the browser, against the offline package
+on the same files, and asserts that the per-embryo log₂FC, the control anchors,
+the outlier flags and the per-session Prism cells all match.
 
----
+One difference is documented rather than fixed. The browser engine sorts its
+long rows by `(date, row number, condition)` before building the Prism table,
+so its columns come out alphabetical. The offline package keeps the order the
+conditions have in the CSV header, with the control first. Every cell value is
+identical; only the columns sit in a different sequence.
 
-## Tech stack
+## Data
 
-**Analysis (in-browser via WebAssembly)**
+This repository does not include the real experimental data. `data/example/`
+holds a synthetic dataset generated by `scripts/make_example_data.py`, with the
+same structure as the laboratory data: two groups, two panels, a shared
+control, unbalanced sessions, missing cells, strong session drift and planted
+extreme embryos.
 
-![Pyodide](https://img.shields.io/badge/Pyodide-3776AB?style=flat-square&logo=python&logoColor=white)
-![NumPy](https://img.shields.io/badge/NumPy-013243?style=flat-square&logo=numpy&logoColor=white)
-![Plotly](https://img.shields.io/badge/Plotly-3F4F75?style=flat-square&logo=plotly&logoColor=white)
-
-**Frontend**
-
-![HTML5](https://img.shields.io/badge/HTML5-E34F26?style=flat-square&logo=html5&logoColor=white)
-![CSS3](https://img.shields.io/badge/CSS3-1572B6?style=flat-square&logo=css3&logoColor=white)
-![JavaScript](https://img.shields.io/badge/JavaScript-F7DF1E?style=flat-square&logo=javascript&logoColor=black)
-![Bootstrap](https://img.shields.io/badge/Bootstrap-7952B3?style=flat-square&logo=bootstrap&logoColor=white)
-
-**Packaging**
-
-![JSZip](https://img.shields.io/badge/JSZip-555555?style=flat-square)
-![FileSaver](https://img.shields.io/badge/FileSaver.js-555555?style=flat-square)
-
----
-
-## Project structure
-
-```text
-zebrafish-ros-normalization-online/
-├── index.html                ← main UI
-├── style.css                 ← app styling
-├── app.js                    ← Pyodide init, UI logic, Plotly rendering, ZIP export
-├── zebrafish_ros_engine.py   ← analysis engine running in-browser
-├── .nojekyll                 ← GitHub Pages compatibility
-└── LICENSE                   ← MIT license
-```
-
----
-
-## Local development
-
-To preview locally:
+To regenerate it:
 
 ```bash
-python3 -m http.server 8000
+python scripts/make_example_data.py --seed 20260908
 ```
 
-Then open:
+Real CSVs belong in `data/raw/`, which is in `.gitignore`.
 
-```text
-http://localhost:8000
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+pip install -e .
+pytest -q
 ```
 
----
+The tests cover parity with the browser engine and the mathematical invariants:
+that the normalized control is centred on 1, that rescaling a whole session
+leaves every normalized value unchanged, that the anchor choice does not move a
+single *p* value, that normalization lowers the across-date CV of every
+condition, and that the *n* of the tests counts sessions and not embryos.
 
-## GitHub Pages
+## Layout
 
-The project is designed to be deployed as a static GitHub Pages site.
+```
+index.html, style.css, app.js       browser app
+zebrafish_ros_engine.py             analysis engine loaded by Pyodide
+zebrafish_ros/                      offline package
+    tidy.py        reading wide CSVs and de-duplicating the control
+    outliers.py    Tukey flagging within date and condition
+    normalize.py   within-session normalization
+    stats.py       descriptives, session as replicate, Holm, mixed model
+    prism.py       wide tables for GraphPad Prism
+    plots.py       SuperPlots and the control drift figure
+    pipeline.py    orchestration and output writing
+    __main__.py    CLI
+scripts/
+    make_example_data.py
+    build_methods_pdf.py
+data/example/                       versioned synthetic data
+tests/
+docs/methods.pdf                    typeset version of METHODS.md
+METHODS.md                          manuscript-ready Methods text
+```
 
-Typical setup:
+## Citation
 
-1. push `main` to GitHub;
-2. enable GitHub Pages from the `main` branch and root folder;
-3. wait for GitHub to publish the site.
+If this code contributes to published work, please cite the repository and the
+SuperPlot method:
 
----
-
-## Notes
-
-- The first Pyodide load may take several seconds.
-- The app downloads runtime dependencies from public CDNs.
-- A detectable date column and at least one condition column are required per file.
-- The control does not need to be named `DMSO`, but one control must always be selected before analysis starts.
-
----
+> Lord SJ, Velle KB, Mullins RD, Fritz-Laylin LK. SuperPlots: Communicating
+> reproducibility and variability in cell biology. *J Cell Biol.*
+> 2020;219(6):e202001064. doi:10.1083/jcb.202001064
 
 ## Author
 
-**Emiliano Balderas Ramírez**  
-Bioengineer · PhD Candidate in Biochemical Sciences  
+**Emiliano Balderas Ramírez**
+Bioengineer, PhD candidate in Biochemical Sciences
 Instituto de Biotecnología (IBt), UNAM
 
-[![LinkedIn](https://img.shields.io/badge/LinkedIn-emilianobalderas-0A66C2?style=flat-square&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/emilianobalderas/)
-[![Email](https://img.shields.io/badge/Email-ebalderas%40live.com.mx-D14836?style=flat-square&logo=gmail&logoColor=white)](mailto:ebalderas@live.com.mx)
+## Licence
 
----
-
-<div align="center"><i>Zebrafish ROS Normalizer Online — upload your CSVs, choose your controls, compare dates correctly.</i></div>
+MIT. See [LICENSE](LICENSE).

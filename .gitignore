@@ -1,1 +1,28 @@
+# ---------------------------------------------------------------
+# Real experimental data: do not version until it is published.
+# Raw CSVs live in data/raw/. The data/example/ files are SYNTHETIC
+# and are versioned on purpose.
+# ---------------------------------------------------------------
+/*.csv
+data/raw/
+
+# Generated outputs
+/results/
+*.zip
+
+# Python
 __pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store

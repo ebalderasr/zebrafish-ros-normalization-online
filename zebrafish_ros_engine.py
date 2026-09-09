@@ -582,7 +582,7 @@ def analyze_one_file(source_file, text, control_column=None):
     if n_outliers:
         add_warning(warnings, "warning", "outliers_flagged_not_removed", f"Se detectaron {n_outliers} posibles outliers con la regla 1.5×IQR dentro de cada grupo fecha-condición.", source_file=source_file)
     add_warning(warnings, "info", "statistical_unit_note",
-        "NOTA ESTADÍSTICA — PSEUDORREPLICACIÓN: La unidad experimental independiente es la FECHA de "
+        "NOTA ESTADÍSTICA, PSEUDORREPLICACIÓN: La unidad experimental independiente es la FECHA de "
         "adquisición (cada día = una réplica experimental), no el embrión individual. "
         "La tabla 'PRISM_por_fecha' (una fila por día experimental) es la apropiada para inferencia "
         "estadística estándar (t-test, ANOVA, etc.) donde N = número de fechas. "

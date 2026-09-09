@@ -1,0 +1,11 @@
+# Reading and tidying use only the standard library plus NumPy, which is
+# needed so the offline percentiles match the browser engine bit for bit.
+numpy>=1.24
+pandas>=2.0
+scipy>=1.10
+matplotlib>=3.7
+seaborn>=0.13
+
+# Optional: enables the mixed model in `zebrafish_ros.stats`.
+# Without it the rest of the analysis works the same.
+statsmodels>=0.14
