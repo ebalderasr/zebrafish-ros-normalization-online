@@ -39,8 +39,8 @@ same session, which is what makes the within-session anchor described below
 necessary rather than merely convenient.
 
 The individual embryo was the unit of measurement. The independent acquisition
-session, defined as a cohort of embryos stained, treated, and imaged on the
-same day, was the unit of replication. Values were exported as one matrix per
+session, defined as all embryos stained, treated and imaged on the same day,
+was the unit of replication. Values were exported as one matrix per
 experimental group and per pharmacological panel, with rows corresponding to
 individual embryos and columns to conditions, and converted to long format in
 which each record comprises the group, acquisition date, condition, and
